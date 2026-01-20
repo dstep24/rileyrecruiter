@@ -639,8 +639,12 @@ export default function SourcingPage() {
     }
 
     console.log(`[Enrich] Fetching full profile for ${candidate.name} (${candidate.providerId})`);
+    console.log(`[Enrich] API_BASE: ${API_BASE}`);
+    console.log(`[Enrich] Full URL: ${API_BASE}/api/profile/enrich`);
+    console.log(`[Enrich] unipileConfig present:`, !!unipileConfig);
 
     try {
+      console.log(`[Enrich] Sending fetch request...`);
       const response = await fetch(`${API_BASE}/api/profile/enrich`, {
         method: 'POST',
         headers: {
@@ -651,6 +655,7 @@ export default function SourcingPage() {
           unipileConfig,
         }),
       });
+      console.log(`[Enrich] Got response, status: ${response.status}`);
 
       if (response.ok) {
         const data = await response.json();

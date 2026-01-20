@@ -1670,11 +1670,13 @@ router.post('/company/research', async (req, res) => {
  * Used to get detailed candidate info before AI scoring.
  */
 router.post('/profile/enrich', async (req, res) => {
+  console.log('[Profile Enrich] Endpoint hit');
   const { providerId, unipileConfig } = req.body;
 
   if (!providerId) {
     return res.status(400).json({ error: 'providerId is required' });
   }
+  console.log(`[Profile Enrich] Enriching profile: ${providerId}`);
 
   // Check for Unipile config
   const headerUnipileKey = req.headers['x-unipile-api-key'] as string;

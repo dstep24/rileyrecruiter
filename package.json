@@ -4,7 +4,8 @@
   "main": "dist/index.js",
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "tsx watch --ignore './src/generated/**' src/index.ts",
+    "dev:no-watch": "tsx src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "jest",
