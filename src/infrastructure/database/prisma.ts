@@ -2,7 +2,7 @@
  * Prisma Client - Database access with tenant isolation
  */
 
-import { Pool, neonConfig } from '@neondatabase/serverless';
+import { neonConfig } from '@neondatabase/serverless';
 import { PrismaNeon } from '@prisma/adapter-neon';
 import { PrismaClient } from '../../generated/prisma/index.js';
 import { createTenantExtension } from './TenantContext.js';
@@ -14,27 +14,45 @@ import { createTenantExtension } from './TenantContext.js';
 // Configure Neon for Node.js environment
 neonConfig.webSocketConstructor = (await import('ws')).default;
 
-// Create connection pool
-const connectionString = process.env.DATABASE_URL!;
-const pool = new Pool({ connectionString });
-
-// Create Prisma adapter
-const adapter = new PrismaNeon(pool);
-
 // =============================================================================
-// PRISMA CLIENT SINGLETON
+// LAZY INITIALIZATION
+// We use lazy initialization to ensure DATABASE_URL is available from dotenv
 // =============================================================================
 
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined;
+  adapter: PrismaNeon | undefined;
 };
+
+function getAdapter(): PrismaNeon {
+  if (!globalForPrisma.adapter) {
+    const connectionString = process.env.DATABASE_URL;
+    if (!connectionString) {
+      throw new Error('DATABASE_URL environment variable is not set');
+    }
+    // PrismaNeon takes PoolConfig, not Pool instance
+    globalForPrisma.adapter = new PrismaNeon({ connectionString });
+  }
+  return globalForPrisma.adapter;
+}
+
+// =============================================================================
+// PRISMA CLIENT SINGLETON
+// =============================================================================
 
 /**
  * Base Prisma client without tenant extension
  * Use this for operations that need to work across tenants
  * (e.g., looking up tenant by slug)
  */
-export const prismaBase = globalForPrisma.prisma ?? new PrismaClient({ adapter });
+function getPrismaBase(): PrismaClient {
+  if (!globalForPrisma.prisma) {
+    globalForPrisma.prisma = new PrismaClient({ adapter: getAdapter() });
+  }
+  return globalForPrisma.prisma;
+}
+
+export const prismaBase = getPrismaBase();
 
 if (process.env.NODE_ENV !== 'production') {
   globalForPrisma.prisma = prismaBase;

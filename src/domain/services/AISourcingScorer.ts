@@ -76,6 +76,10 @@ export interface RoleInput {
   excludeCompanies?: string[];
   /** Target industries for cultural fit (e.g., fintech, insurance, banking) */
   targetIndustries?: string[];
+  /** If true, prioritize candidates with contract/freelance experience */
+  isContractRole?: boolean;
+  /** Expected contract duration (e.g., "6 months", "12+ months") */
+  contractDuration?: string;
 }
 
 export interface PillarScore {
@@ -199,6 +203,26 @@ ${role.excludeCompanies?.length ? `- Excluded Companies (PENALIZE): ${role.exclu
 - Look for "transformation" signals: modernization, migration, legacy-to-modern work
 - Candidates who've done transformation work in similar industries are HIGHLY valuable` : '';
 
+  // Build contract role section if applicable
+  const contractRoleSection = role.isContractRole ? `
+### ⚡ CONTRACT ROLE CONSIDERATIONS
+**This is a CONTRACT role** (not permanent employment).
+${role.contractDuration ? `Expected Duration: ${role.contractDuration}` : ''}
+
+PRIORITIZE candidates with demonstrated contract/freelance experience:
+- Look for keywords in titles/descriptions: "contract", "contractor", "freelance", "consultant", "1099", "independent"
+- Multiple roles with clear end dates (3-12 month tenures) suggest project-based work
+- Job titles containing: "Contractor", "Consultant", "Freelance", "Independent"
+- Roles ending mid-year often indicate project-based engagements
+- Companies like staffing agencies (Robert Half, TEKsystems, Insight Global, Randstad, etc.) indicate contract work
+- Look for patterns: varied industries, multiple short stints, project-based descriptions
+
+CONTRACT EXPERIENCE SCORING BOOST:
+- Clear contract history (3+ contract roles): Boost overall score 10-15 points
+- Some contract experience (1-2 contract roles): Boost 5-10 points
+- No contract indicators but relevant skills: Neutral (still consider)
+- Only permanent roles with long tenure (3+ years each): Note lower contract fit` : '';
+
   // Build experience history section if available
   const experienceSection = candidate.experiences && candidate.experiences.length > 0
     ? `
@@ -236,6 +260,7 @@ ${role.industry ? `Industry: ${role.industry}` : ''}
 ${role.teamSize ? `Team Size: ${role.teamSize}` : ''}
 ${technicalSection}
 ${cultureFitSection}
+${contractRoleSection}
 
 ## Candidate to Evaluate
 Name: ${candidate.name}
@@ -315,6 +340,14 @@ If Must-Have skills are specified in Technical Requirements above, you MUST:
   * Enterprise → Enterprise is easier than Startup → Enterprise
   * Fintech → Fintech, Healthcare → Healthcare, etc.
 - FAANG/big tech candidates may struggle at legacy enterprise (culture/comp mismatch)
+${role.isContractRole ? `
+**CONTRACT FIT (for contract roles):**
+- PRIORITIZE candidates showing contract/freelance work patterns in their history
+- Look for adaptability signals: multiple industries, varied project types, quick ramp-up evidence
+- Contractors who hit the ground running are valuable - look for evidence of fast onboarding
+- Multiple short tenures (6-12 months) is a POSITIVE signal for contract roles
+- Titles with "Contractor", "Consultant", "Freelance" are strong indicators
+- BOOST score 10-15 points for clear contract history` : ''}
 
 ### Location (0-100) - Weight: 15%
 - Same city = 100

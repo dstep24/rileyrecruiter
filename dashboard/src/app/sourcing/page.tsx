@@ -29,6 +29,7 @@ import {
   Check,
   MessageSquareText,
   Globe,
+  Briefcase,
 } from 'lucide-react';
 import { CandidateScoreCard, BatchScoringSummaryCard, type CandidateScore } from '../../components/CandidateScoreCard';
 import { SourcingScoreCard, BatchSourcingSummaryCard, type SourcingScore } from '../../components/SourcingScoreCard';
@@ -241,6 +242,7 @@ export default function SourcingPage() {
     skills: '',
     location: '',
     isFullyRemote: false, // If true, skip location filtering in search
+    isContractRole: false, // If true, prioritize candidates with contract/freelance experience
     intakeNotes: '', // Notes from hiring manager conversation - takes precedence over JD
     excludeCompanies: '', // Companies to exclude (e.g., "Google, Facebook, Amazon")
     targetIndustries: '', // Target industries for cultural fit (e.g., "fintech, insurance, banking")
@@ -310,6 +312,7 @@ export default function SourcingPage() {
           skills: parsed.customJD.skills || '',
           location: parsed.customJD.location || '',
           isFullyRemote: (parsed.customJD as { isFullyRemote?: boolean }).isFullyRemote || false,
+          isContractRole: (parsed.customJD as { isContractRole?: boolean }).isContractRole || false,
           intakeNotes: (parsed.customJD as { intakeNotes?: string }).intakeNotes || '',
           excludeCompanies: (parsed.customJD as { excludeCompanies?: string }).excludeCompanies || '',
           targetIndustries: (parsed.customJD as { targetIndustries?: string }).targetIndustries || '',
@@ -564,6 +567,8 @@ export default function SourcingPage() {
             // Culture fit criteria
             excludeCompanies: customJD.excludeCompanies?.split(',').map(c => c.trim()).filter(Boolean) || undefined,
             targetIndustries: customJD.targetIndustries?.split(',').map(i => i.trim()).filter(Boolean) || undefined,
+            // Contract role prioritization
+            isContractRole: customJD.isContractRole,
           },
           // Intake notes from HM that take precedence over JD
           intakeNotes: customJD.intakeNotes?.trim() || undefined,
@@ -705,14 +710,19 @@ export default function SourcingPage() {
 
   // Enrich all candidates' profiles and then re-run AI scoring
   const enrichAllProfiles = async (candidates: SourcedCandidate[], autoRescore: boolean = true) => {
+    console.log('[EnrichAll] Function called with', candidates.length, 'candidates, autoRescore:', autoRescore);
+
     if (!unipileConfig) {
-      console.error('[Enrich] No unipileConfig available');
+      console.error('[EnrichAll] No unipileConfig available');
       return;
     }
+    console.log('[EnrichAll] unipileConfig is present');
 
     // Only enrich candidates that haven't been enriched yet and have a providerId
     const toEnrich = candidates.filter(c => !c.isProfileEnriched && c.providerId);
-    console.log(`[Enrich] Enriching ${toEnrich.length} profiles out of ${candidates.length} total`);
+    console.log(`[EnrichAll] Filtering candidates: ${toEnrich.length} to enrich out of ${candidates.length} total`);
+    console.log(`[EnrichAll] Candidates without providerId:`, candidates.filter(c => !c.providerId).length);
+    console.log(`[EnrichAll] Already enriched:`, candidates.filter(c => c.isProfileEnriched).length);
 
     if (toEnrich.length === 0) {
       console.log('[Enrich] All profiles already enriched');
@@ -890,6 +900,8 @@ export default function SourcingPage() {
               // Culture fit criteria
               excludeCompanies: customJD.excludeCompanies?.split(',').map(c => c.trim()).filter(Boolean) || undefined,
               targetIndustries: customJD.targetIndustries?.split(',').map(i => i.trim()).filter(Boolean) || undefined,
+              // Contract role prioritization
+              isContractRole: customJD.isContractRole,
             },
             // Intake notes from HM that take precedence over JD
             intakeNotes: customJD.intakeNotes?.trim() || undefined,
@@ -2125,6 +2137,7 @@ export default function SourcingPage() {
       skills: '',
       location: '',
       isFullyRemote: false,
+      isContractRole: false,
       intakeNotes: '',
       excludeCompanies: '',
       targetIndustries: '',
@@ -2303,6 +2316,16 @@ export default function SourcingPage() {
                     />
                     <Globe className="h-3.5 w-3.5 text-blue-600" />
                     <span className="text-gray-600">Fully Remote</span>
+                  </label>
+                  <label className="flex items-center gap-1.5 text-sm cursor-pointer ml-4" title="Prioritize candidates with contract/freelance experience in scoring">
+                    <input
+                      type="checkbox"
+                      checked={customJD.isContractRole}
+                      onChange={(e) => setCustomJD({ ...customJD, isContractRole: e.target.checked })}
+                      className="w-4 h-4 text-orange-600 border-gray-300 rounded focus:ring-orange-500"
+                    />
+                    <Briefcase className="h-3.5 w-3.5 text-orange-600" />
+                    <span className="text-gray-600">Contract Role</span>
                   </label>
                 </div>
                 <input
