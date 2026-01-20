@@ -524,14 +524,25 @@ export default function SourcingPage() {
         });
       });
       console.log(`[AI Scoring] === END DETAILED DATA ===`);
+      console.log(`[AI Scoring] Sending request to ${API_BASE}/api/ai/sourcing-score with ${candidatePayload.length} candidates`);
+      console.log(`[AI Scoring] API key present: ${!!apiKey}`);
 
-      const response = await fetch(`${API_BASE}/api/ai/sourcing-score`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(apiKey ? { 'X-Anthropic-Api-Key': apiKey } : {}),
-        },
-        body: JSON.stringify({
+      // Add timeout to prevent infinite hanging (3 minutes should be enough for ~25 candidates)
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => {
+        controller.abort();
+        console.error('[AI Scoring] Request timed out after 3 minutes');
+      }, 180000);
+
+      try {
+        const response = await fetch(`${API_BASE}/api/ai/sourcing-score`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(apiKey ? { 'X-Anthropic-Api-Key': apiKey } : {}),
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
           candidates: candidatePayload,
           role: {
             title: parsedCriteria.titles[0] || customJD.title,
@@ -603,8 +614,15 @@ export default function SourcingPage() {
           };
         });
       }
+      } finally {
+        clearTimeout(timeoutId);
+      }
     } catch (error) {
-      console.error('AI sourcing scoring failed:', error);
+      if (error instanceof Error && error.name === 'AbortError') {
+        console.error('[AI Scoring] Request was aborted (timeout)');
+      } else {
+        console.error('AI sourcing scoring failed:', error);
+      }
     } finally {
       setIsAiScoring(false);
     }

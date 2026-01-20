@@ -468,7 +468,7 @@ export default function SettingsPage() {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
-                'X-Anthropic-Key': anthropicApiKey,
+                'X-Anthropic-Api-Key': anthropicApiKey,
               },
               body: JSON.stringify({
                 candidates: [{ id: 'test', name: 'Test User', currentTitle: 'Engineer' }],

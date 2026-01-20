@@ -40,7 +40,7 @@ interface QueuedCandidate {
   profilePictureUrl?: string;
   relevanceScore: number;
   status: 'pending' | 'approved' | 'sent' | 'rejected' | 'failed';
-  messageType: 'connection_request' | 'inmail' | 'message';
+  messageType: 'connection_request' | 'connection_only' | 'inmail' | 'message';
   messageDraft?: string;
   createdAt: string;
   searchCriteria?: {
@@ -72,7 +72,8 @@ function formatWaitTime(createdAt: string): string {
 }
 
 const messageTypeLabels: Record<string, { label: string; icon: typeof Send }> = {
-  connection_request: { label: 'Connection Request', icon: UserPlus },
+  connection_request: { label: 'Connect + Message', icon: UserPlus },
+  connection_only: { label: 'Connect (No Message)', icon: UserPlus },
   inmail: { label: 'InMail', icon: Mail },
   message: { label: 'Direct Message', icon: MessageSquare },
 };
@@ -249,7 +250,7 @@ Best regards`;
               'Growth opportunities',
             ],
           },
-          channel: item.messageType === 'connection_request'
+          channel: item.messageType === 'connection_request' || item.messageType === 'connection_only'
             ? 'linkedin_connection'
             : item.messageType === 'inmail'
             ? 'linkedin_inmail'
@@ -303,7 +304,7 @@ Best regards`;
   };
 
   // Change message type
-  const changeMessageType = (itemId: string, newType: 'connection_request' | 'inmail' | 'message') => {
+  const changeMessageType = (itemId: string, newType: 'connection_request' | 'connection_only' | 'inmail' | 'message') => {
     const updatedQueue = queue.map((item) =>
       item.id === itemId ? { ...item, messageType: newType } : item
     );
@@ -329,19 +330,25 @@ Best regards`;
       const messageText = item.messageDraft || generateDefaultMessage(item);
       const apiUrl = `https://${unipileConfig.dsn}.unipile.com:${unipileConfig.port}/api/v1`;
 
-      if (item.messageType === 'connection_request') {
-        // Send connection request with message
+      if (item.messageType === 'connection_request' || item.messageType === 'connection_only') {
+        // Send connection request - with or without message
+        const requestBody: Record<string, string> = {
+          provider_id: item.providerId,
+          account_id: unipileConfig.accountId,
+        };
+
+        // Only include message if it's a connection_request (not connection_only)
+        if (item.messageType === 'connection_request') {
+          requestBody.message = messageText;
+        }
+
         const response = await fetch(`${apiUrl}/users/invite`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'X-API-KEY': unipileConfig.apiKey,
           },
-          body: JSON.stringify({
-            provider_id: item.providerId,
-            account_id: unipileConfig.accountId,
-            message: messageText,
-          }),
+          body: JSON.stringify(requestBody),
         });
 
         if (!response.ok) {
@@ -349,7 +356,7 @@ Best regards`;
           throw new Error(`Failed to send connection request: ${response.status} - ${errorText}`);
         }
 
-        console.log(`[Queue] Connection request sent to ${item.name}`);
+        console.log(`[Queue] Connection request ${item.messageType === 'connection_only' ? '(no message)' : 'with message'} sent to ${item.name}`);
       } else {
         // Send InMail or direct message via starting a new chat
         const response = await fetch(`${apiUrl}/chats`, {
@@ -659,10 +666,11 @@ Best regards`;
                 <div className="flex-1">
                   <select
                     value={item.messageType}
-                    onChange={(e) => changeMessageType(item.id, e.target.value as 'connection_request' | 'inmail' | 'message')}
+                    onChange={(e) => changeMessageType(item.id, e.target.value as 'connection_request' | 'connection_only' | 'inmail' | 'message')}
                     className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   >
-                    <option value="connection_request">Connection Request</option>
+                    <option value="connection_request">Connect + Message</option>
+                    <option value="connection_only">Connect (No Message)</option>
                     <option value="inmail">InMail (Premium)</option>
                     <option value="message">Direct Message</option>
                   </select>

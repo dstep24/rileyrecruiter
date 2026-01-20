@@ -1449,6 +1449,7 @@ router.post('/ai/generate-search-strategy', async (req, res) => {
  *              "CTO at Fortune 500" = 2-3 levels above Director
  */
 router.post('/ai/sourcing-score', async (req, res) => {
+  console.log('[AI Sourcing Score] Endpoint hit');
   const { candidates, role, intakeNotes, isFullyRemote } = req.body;
 
   if (!candidates || !Array.isArray(candidates) || candidates.length === 0) {
@@ -1459,11 +1460,15 @@ router.post('/ai/sourcing-score', async (req, res) => {
     return res.status(400).json({ error: 'role with title is required' });
   }
 
+  console.log('[AI Sourcing Score] Validation passed, checking API key');
+
   // Check for Anthropic API key
   const headerApiKey = req.headers['x-anthropic-api-key'] as string;
   const envApiKey = process.env.ANTHROPIC_API_KEY;
   const anthropicApiKey = headerApiKey || envApiKey;
   const hasAnthropicKey = !!anthropicApiKey;
+
+  console.log(`[AI Sourcing Score] Has API key: ${hasAnthropicKey}, from header: ${!!headerApiKey}, from env: ${!!envApiKey}`);
 
   // Temporarily set the API key for this request if provided via header
   if (headerApiKey && !envApiKey) {
@@ -1472,15 +1477,20 @@ router.post('/ai/sourcing-score', async (req, res) => {
 
   if (hasAnthropicKey) {
     try {
+      console.log('[AI Sourcing Score] Importing ClaudeClient...');
       // Reset singletons to pick up the new API key
       const { resetClaudeClient } = await import('../../integrations/llm/ClaudeClient.js');
+      console.log('[AI Sourcing Score] Resetting ClaudeClient...');
       resetClaudeClient();
 
+      console.log('[AI Sourcing Score] Importing AISourcingScorer...');
       const { AISourcingScorer, resetAISourcingScorer } = await import(
         '../../domain/services/AISourcingScorer.js'
       );
+      console.log('[AI Sourcing Score] Resetting AISourcingScorer...');
       resetAISourcingScorer();
 
+      console.log('[AI Sourcing Score] Creating scorer instance...');
       const scorer = new AISourcingScorer();
 
       // Convert candidates to proper format (including full profile data if enriched)
