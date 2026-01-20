@@ -371,6 +371,115 @@ model RileyMessage {
   @@map("riley_messages")
 }
 
+// =============================================================================
+// PRE-SCREENING ASSESSMENT MODELS
+// =============================================================================
+
+model PreScreeningTemplate {
+  id          String   @id @default(uuid())
+  tenantId    String
+
+  name        String                    // "Senior Engineer Screen"
+  description String?
+  roleType    String?                   // "engineering", "sales", etc.
+  isActive    Boolean  @default(true)
+
+  questions   PreScreeningQuestion[]
+  responses   PreScreeningResponse[]
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([tenantId, isActive])
+  @@map("pre_screening_templates")
+}
+
+model PreScreeningQuestion {
+  id            String       @id @default(uuid())
+  templateId    String
+
+  questionText  String                    // "Do you require visa sponsorship?"
+  questionType  QuestionType              // MULTIPLE_CHOICE, TEXT, YES_NO, SCALE
+  options       Json?                     // ["Yes", "No", "Not sure"]
+  isRequired    Boolean      @default(true)
+  orderIndex    Int
+
+  // Scoring config
+  scoringWeight Int          @default(1)
+  idealAnswer   String?                   // For auto-scoring
+
+  template      PreScreeningTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  answers       PreScreeningAnswer[]
+
+  @@index([templateId, orderIndex])
+  @@map("pre_screening_questions")
+}
+
+model PreScreeningResponse {
+  id              String         @id @default(uuid())
+  templateId      String
+  conversationId  String                  // Links to RileyConversation
+
+  candidateName   String?
+  candidateEmail  String?
+
+  status          ResponseStatus @default(PENDING)
+  submittedAt     DateTime?
+
+  // AI Scoring Results
+  aiScore         Int?                    // 0-100
+  aiSummary       String?                 // AI-generated summary
+  aiFlags         Json?                   // ["sponsorship_needed", "salary_mismatch"]
+
+  // Token security
+  accessToken     String         @unique  // JWT for secure access
+  expiresAt       DateTime
+
+  template        PreScreeningTemplate @relation(fields: [templateId], references: [id])
+  answers         PreScreeningAnswer[]
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([conversationId])
+  @@index([accessToken])
+  @@map("pre_screening_responses")
+}
+
+model PreScreeningAnswer {
+  id          String   @id @default(uuid())
+  responseId  String
+  questionId  String
+
+  answerText  String
+  answerValue Json?                     // For structured answers
+
+  response    PreScreeningResponse @relation(fields: [responseId], references: [id], onDelete: Cascade)
+  question    PreScreeningQuestion @relation(fields: [questionId], references: [id])
+
+  @@unique([responseId, questionId])
+  @@map("pre_screening_answers")
+}
+
+// =============================================================================
+// ENUMS
+// =============================================================================
+
+enum QuestionType {
+  MULTIPLE_CHOICE
+  TEXT
+  YES_NO
+  SCALE
+  DATE
+}
+
+enum ResponseStatus {
+  PENDING
+  STARTED
+  COMPLETED
+  EXPIRED
+}
+
 enum TenantStatus {
   ONBOARDING
   SHADOW_MODE
@@ -585,6 +694,8 @@ enum RileyConversationStage {
   INITIAL_OUTREACH
   AWAITING_RESPONSE
   IN_CONVERSATION
+  ASSESSMENT_SENT           // Assessment link sent to candidate
+  ASSESSMENT_COMPLETE       // Candidate completed assessment
   SCHEDULING
   SCHEDULED
   FOLLOW_UP

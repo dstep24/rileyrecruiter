@@ -12,6 +12,7 @@ import { healthRoutes, taskRoutes, sourcingRoutes } from './routes/index.js';
 import actionsRoutes from './routes/actions.js';
 import coreApiRoutes from './routes/demo.js'; // Main API routes (analytics, settings, chat, AI, etc.)
 import webhooksRoutes from './routes/webhooks.js'; // Webhook handlers for external services
+import assessmentsRoutes from './routes/assessments.js'; // Pre-screening assessment routes
 
 // =============================================================================
 // CREATE APP
@@ -76,6 +77,9 @@ export function createApp() {
 
   // Sourcing API (LinkedIn search)
   app.use('/api/sourcing', sourcingRoutes);
+
+  // Assessments API (pre-screening)
+  app.use('/api/assessments', assessmentsRoutes);
 
   // ===========================================================================
   // CORE API ROUTES (analytics, settings, AI, chat, etc.)
