@@ -1,0 +1,100 @@
+/**
+ * Express Application - Riley Recruiter API
+ */
+
+import express from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+
+import { tenantMiddleware } from './middleware/tenantMiddleware.js';
+import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
+import { healthRoutes, taskRoutes, sourcingRoutes } from './routes/index.js';
+import actionsRoutes from './routes/actions.js';
+import coreApiRoutes from './routes/demo.js'; // Main API routes (analytics, settings, chat, AI, etc.)
+import webhooksRoutes from './routes/webhooks.js'; // Webhook handlers for external services
+
+// =============================================================================
+// CREATE APP
+// =============================================================================
+
+export function createApp() {
+  const app = express();
+
+  // ===========================================================================
+  // GLOBAL MIDDLEWARE
+  // ===========================================================================
+
+  // Security headers
+  app.use(helmet());
+
+  // CORS
+  app.use(
+    cors({
+      origin: process.env.CORS_ORIGIN || '*',
+      methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'X-Tenant-Id', 'X-Request-Id', 'X-Anthropic-Api-Key'],
+    })
+  );
+
+  // Body parsing
+  app.use(express.json({ limit: '10mb' }));
+  app.use(express.urlencoded({ extended: true }));
+
+  // Request ID
+  app.use((req, _res, next) => {
+    if (!req.headers['x-request-id']) {
+      req.headers['x-request-id'] = crypto.randomUUID();
+    }
+    next();
+  });
+
+  // ===========================================================================
+  // PUBLIC ROUTES (no tenant required)
+  // ===========================================================================
+
+  // Health checks
+  app.use('/health', healthRoutes);
+
+  // ===========================================================================
+  // WEBHOOKS (no tenant required - external services call these)
+  // ===========================================================================
+
+  app.use('/webhooks', webhooksRoutes);
+
+  // ===========================================================================
+  // TENANT-SCOPED ROUTES
+  // ===========================================================================
+
+  // Apply tenant middleware to all /api routes
+  app.use('/api', tenantMiddleware());
+
+  // Tasks API
+  app.use('/api/tasks', taskRoutes);
+
+  // Actions API (triggers)
+  app.use('/api/actions', actionsRoutes);
+
+  // Sourcing API (LinkedIn search)
+  app.use('/api/sourcing', sourcingRoutes);
+
+  // ===========================================================================
+  // CORE API ROUTES (analytics, settings, AI, chat, etc.)
+  // These use the tenant middleware already applied above
+  // ===========================================================================
+
+  app.use('/api', coreApiRoutes);
+
+  // ===========================================================================
+  // ERROR HANDLING
+  // ===========================================================================
+
+  // 404 handler
+  app.use(notFoundHandler);
+
+  // Error handler
+  app.use(errorHandler);
+
+  return app;
+}
+
+export default createApp;

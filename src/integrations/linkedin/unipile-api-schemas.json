@@ -1,0 +1,283 @@
+{
+  "_metadata": {
+    "source": "https://developer.unipile.com/docs/linkedin-search",
+    "lastUpdated": "2026-01-17",
+    "description": "Unipile LinkedIn API response schemas for local reference"
+  },
+  "apiTypes": {
+    "classic": {
+      "description": "Basic LinkedIn API",
+      "hasHeadcount": false,
+      "features": ["basic_search", "messaging"]
+    },
+    "sales_navigator": {
+      "description": "LinkedIn Sales Navigator API",
+      "hasHeadcount": true,
+      "features": ["advanced_filters", "saved_searches", "years_of_experience", "seniority"]
+    },
+    "recruiter": {
+      "description": "LinkedIn Recruiter API",
+      "hasHeadcount": true,
+      "features": ["all_filters", "skill_priority", "role_scope", "inmail"]
+    }
+  },
+  "searchCategories": ["people", "companies", "jobs", "posts"],
+  "schemas": {
+    "companySearchRequest": {
+      "api": "classic | sales_navigator | recruiter",
+      "category": "companies",
+      "keywords": "string",
+      "limit": "number (default: 10)"
+    },
+    "companySearchResponse": {
+      "object": "LinkedinSearch",
+      "items": {
+        "type": "COMPANY",
+        "id": "string - LinkedIn company ID",
+        "name": "string - Company name",
+        "profile_url": "string - LinkedIn URL",
+        "summary": "string - Company description",
+        "industry": "string - Industry classification",
+        "location": "string - HQ location",
+        "logo": "string - Logo URL",
+        "followers_count": "number - LinkedIn followers",
+        "job_offers_count": "number - Open positions",
+        "headcount": "string (ONLY in sales_navigator/recruiter) - e.g., '152'"
+      },
+      "paging": {
+        "start": "number",
+        "page_count": "number",
+        "total_count": "number"
+      },
+      "cursor": "string | undefined"
+    },
+    "companyResponseExamples": {
+      "classicApi": {
+        "type": "COMPANY",
+        "id": "165158",
+        "name": "Netflix",
+        "profile_url": "https://www.linkedin.com/company/netflix",
+        "summary": "Netflix is a streaming service...",
+        "industry": "Entertainment Providers",
+        "location": "Los Gatos, California",
+        "followers_count": 11000000,
+        "job_offers_count": 427
+      },
+      "salesNavigatorApi": {
+        "type": "COMPANY",
+        "id": "75985997",
+        "name": "Sisloc Softwares",
+        "profile_url": "https://www.linkedin.com/company/sisloc",
+        "summary": "Founded in 2008...",
+        "industry": "Software Development",
+        "location": "Curitiba, Paraná",
+        "headcount": "152",
+        "followers_count": 5000,
+        "job_offers_count": 12
+      }
+    },
+    "peopleSearchRequest": {
+      "api": "classic | sales_navigator | recruiter",
+      "category": "people",
+      "keywords": "string",
+      "location": "string[] - Location IDs from parameter lookup",
+      "title": "string[]",
+      "company": {
+        "include": "string[]",
+        "exclude": "string[]"
+      },
+      "industry": {
+        "include": "string[]",
+        "exclude": "string[]"
+      },
+      "skills": "string[] | SkillFilter[] (recruiter only)",
+      "role": "RoleFilter[] (recruiter only)",
+      "years_of_experience": {
+        "min": "number",
+        "max": "number"
+      },
+      "tenure": {
+        "min": "number",
+        "max": "number"
+      },
+      "seniority": "string[] - ENTRY, SENIOR, MANAGER, DIRECTOR, VP, CXO, PARTNER, OWNER",
+      "network_distance": "number[] - 1, 2, 3",
+      "first_name": "string",
+      "last_name": "string",
+      "limit": "number",
+      "cursor": "string"
+    },
+    "peopleSearchResponse": {
+      "object": "LinkedinSearch",
+      "items": {
+        "id": "string",
+        "provider": "LINKEDIN",
+        "provider_id": "string - ACo... format",
+        "public_identifier": "string - vanity URL",
+        "first_name": "string",
+        "last_name": "string",
+        "name": "string",
+        "headline": "string",
+        "profile_url": "string",
+        "profile_picture_url": "string",
+        "location": "string",
+        "country": "string",
+        "current_title": "string",
+        "current_company": "string",
+        "current_company_id": "string",
+        "connection_degree": "1 | 2 | 3",
+        "connections_count": "number",
+        "mutual_connections": "number",
+        "is_open_to_work": "boolean",
+        "is_premium": "boolean"
+      },
+      "paging": {
+        "start": "number",
+        "page_count": "number",
+        "total_count": "number"
+      },
+      "cursor": "string | undefined"
+    },
+    "profileEnrichmentRequest": {
+      "method": "GET",
+      "url": "/api/v1/users/{provider_id}",
+      "params": {
+        "account_id": "string",
+        "linkedin_sections": "string - '*' for all, or specific: 'experience,about,skills'"
+      }
+    },
+    "profileEnrichmentResponse": {
+      "id": "string",
+      "provider": "LINKEDIN",
+      "provider_id": "string",
+      "public_identifier": "string",
+      "first_name": "string",
+      "last_name": "string",
+      "headline": "string",
+      "summary": "string - About section",
+      "profile_url": "string",
+      "profile_picture_url": "string",
+      "location": "string",
+      "country": "string",
+      "work_experience": [
+        {
+          "company_id": "string",
+          "company": "string",
+          "position": "string",
+          "location": "string",
+          "start": "string - date",
+          "end": "string | null - date or null for current",
+          "description": "string"
+        }
+      ],
+      "skills": [
+        {
+          "name": "string",
+          "endorsements_count": "number"
+        }
+      ],
+      "educations": [
+        {
+          "school_name": "string",
+          "school_id": "string",
+          "degree": "string",
+          "field_of_study": "string",
+          "start_year": "number",
+          "end_year": "number"
+        }
+      ],
+      "connection_degree": "1 | 2 | 3",
+      "connections_count": "number",
+      "mutual_connections": "number",
+      "is_open_to_work": "boolean",
+      "is_premium": "boolean"
+    },
+    "parameterLookupRequest": {
+      "method": "GET",
+      "url": "/api/v1/linkedin/search/parameters",
+      "params": {
+        "account_id": "string",
+        "type": "LOCATION | SKILL | INDUSTRY | COMPANY | SCHOOL | SENIORITY",
+        "keywords": "string",
+        "limit": "number (default: 10)"
+      }
+    },
+    "parameterLookupResponse": {
+      "items": [
+        {
+          "id": "string",
+          "name": "string",
+          "type": "LOCATION | SKILL | INDUSTRY | COMPANY | SCHOOL | SENIORITY"
+        }
+      ]
+    },
+    "recruiterSkillFilter": {
+      "id": "string - skill ID from parameter lookup",
+      "priority": "MUST_HAVE | DOESNT_HAVE"
+    },
+    "recruiterRoleFilter": {
+      "keywords": "string - boolean search e.g., 'developer OR engineer'",
+      "priority": "MUST_HAVE | DOESNT_HAVE",
+      "scope": "CURRENT | PAST | CURRENT_OR_PAST"
+    }
+  },
+  "messaging": {
+    "sendMessage": {
+      "method": "POST",
+      "url": "/api/v1/chats/message",
+      "body": {
+        "account_id": "string",
+        "attendee_provider_id": "string - recipient's provider_id",
+        "text": "string"
+      },
+      "note": "Only works for 1st degree connections"
+    },
+    "sendInMail": {
+      "method": "POST",
+      "url": "/api/v1/chats/inmail",
+      "body": {
+        "account_id": "string",
+        "attendee_provider_id": "string",
+        "subject": "string",
+        "text": "string"
+      },
+      "note": "Works for 2nd/3rd degree connections"
+    },
+    "sendConnectionRequest": {
+      "method": "POST",
+      "url": "/api/v1/users/{provider_id}/invite",
+      "body": {
+        "account_id": "string",
+        "provider_id": "string",
+        "message": "string (max 300 chars)"
+      }
+    }
+  },
+  "fieldMappings": {
+    "work_experience": "We normalize to 'experiences'",
+    "work_experience[].position": "We map to 'experiences[].title'",
+    "work_experience[].company": "We map to 'experiences[].company_name'",
+    "skills (object[])": "We extract .name to get string[]",
+    "headcount (string)": "We parse to number"
+  },
+  "seniorityLevels": [
+    "ENTRY",
+    "SENIOR",
+    "MANAGER",
+    "DIRECTOR",
+    "VP",
+    "CXO",
+    "PARTNER",
+    "OWNER"
+  ],
+  "headcountEstimation": {
+    "description": "When headcount not available (Classic API), estimate from followers_count",
+    "ranges": {
+      "followers_lt_1000": { "estimate": 30, "range": "11-50" },
+      "followers_1000_10000": { "estimate": 200, "range": "51-500" },
+      "followers_10000_50000": { "estimate": 1000, "range": "501-2000" },
+      "followers_50000_200000": { "estimate": 5000, "range": "2001-10000" },
+      "followers_gt_200000": { "estimate": 15000, "range": "10000+" }
+    }
+  }
+}

@@ -1,0 +1,128 @@
+# =============================================================================
+# Riley Recruiter - Docker Compose Configuration
+# =============================================================================
+# Development and production setup with all dependencies
+
+version: '3.8'
+
+services:
+  # ---------------------------------------------------------------------------
+  # Riley API Server
+  # ---------------------------------------------------------------------------
+  riley:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://riley:riley_password@postgres:5432/riley
+      - REDIS_URL=redis://redis:6379
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - riley-network
+
+  # ---------------------------------------------------------------------------
+  # Dashboard (Next.js)
+  # ---------------------------------------------------------------------------
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3000"
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_API_URL=http://riley:3000
+    depends_on:
+      - riley
+    restart: unless-stopped
+    networks:
+      - riley-network
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL Database
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=riley
+      - POSTGRES_PASSWORD=riley_password
+      - POSTGRES_DB=riley
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./prisma/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U riley -d riley"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - riley-network
+
+  # ---------------------------------------------------------------------------
+  # Redis (Queue & Cache)
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - riley-network
+
+  # ---------------------------------------------------------------------------
+  # Worker (Background Jobs)
+  # ---------------------------------------------------------------------------
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["node", "dist/workers/index.js"]
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://riley:riley_password@postgres:5432/riley
+      - REDIS_URL=redis://redis:6379
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - riley-network
+
+# -----------------------------------------------------------------------------
+# Volumes
+# -----------------------------------------------------------------------------
+volumes:
+  postgres-data:
+    driver: local
+  redis-data:
+    driver: local
+
+# -----------------------------------------------------------------------------
+# Networks
+# -----------------------------------------------------------------------------
+networks:
+  riley-network:
+    driver: bridge
