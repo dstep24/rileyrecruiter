@@ -376,6 +376,59 @@ model RileyMessage {
 }
 
 // =============================================================================
+// OUTREACH TRACKING
+// =============================================================================
+
+/// Tracks outreach attempts (connection requests, InMails, messages) for lifecycle management
+model OutreachTracker {
+  id                    String                @id @default(uuid())
+
+  // Candidate identification
+  candidateProviderId   String                // LinkedIn URN (ACoXXX)
+  candidateName         String?
+  candidateProfileUrl   String?
+
+  // What was sent
+  outreachType          OutreachType          // CONNECTION_REQUEST, INMAIL, MESSAGE
+  messageContent        String?               // The message/note sent
+
+  // Job context
+  jobRequisitionId      String?
+  jobTitle              String?
+  assessmentTemplateId  String?
+
+  // Status tracking
+  status                OutreachStatus        @default(SENT)
+  statusHistory         Json?                 // Array of {status, timestamp, details}
+
+  // Timing
+  sentAt                DateTime              @default(now())
+  acceptedAt            DateTime?
+  pitchSentAt           DateTime?
+
+  // Linkage (once conversation starts)
+  rileyConversationId   String?               @unique
+  rileyConversation     RileyConversation?    @relation(fields: [rileyConversationId], references: [id])
+
+  // Sequence tracking
+  sequencePosition      Int                   @default(0)  // 0=initial, 1=pitch, 2=followup1, etc.
+  nextFollowUpAt        DateTime?
+
+  // Metadata
+  sourceQueueItemId     String?               // Original queue item ID
+  tenantId              String                @default("development")
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
+
+  @@unique([candidateProviderId, jobRequisitionId])
+  @@index([status])
+  @@index([candidateProviderId])
+  @@index([nextFollowUpAt])
+  @@index([tenantId])
+  @@map("outreach_tracker")
+}
+
+// =============================================================================
 // OUTREACH TEMPLATES
 // =============================================================================
 
@@ -785,4 +838,23 @@ enum MessageRole {
   RILEY
   CANDIDATE
   TELEOPERATOR
+}
+
+enum OutreachType {
+  CONNECTION_REQUEST    // LinkedIn connection with optional note
+  CONNECTION_ONLY       // Connection without note
+  INMAIL                // LinkedIn InMail
+  DIRECT_MESSAGE        // Direct LinkedIn message (1st degree)
+}
+
+enum OutreachStatus {
+  SENT                  // Initial outreach sent
+  DELIVERED             // Confirmed delivered (if available)
+  CONNECTION_ACCEPTED   // Connection request was accepted
+  PITCH_PENDING         // Ready to send pitch
+  PITCH_SENT            // Pitch message sent
+  REPLIED               // Candidate replied
+  NO_RESPONSE           // No response after follow-ups
+  DECLINED              // Explicitly declined or withdrew
+  BOUNCED               // Failed to deliver
 }
