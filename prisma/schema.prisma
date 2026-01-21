@@ -859,3 +859,93 @@ enum OutreachStatus {
   DECLINED              // Explicitly declined or withdrew
   BOUNCED               // Failed to deliver
 }
+
+// =============================================================================
+// CALENDLY LINK ROTATION
+// =============================================================================
+
+/// Stores recruiter Calendly links for round-robin assignment
+model RecruiterCalendlyLink {
+  id              String    @id @default(uuid())
+
+  // Recruiter info
+  recruiterName   String                    // "John Smith"
+  calendlyUrl     String                    // "https://calendly.com/john-smith/30min"
+
+  // Status
+  isActive        Boolean   @default(true)  // Can be paused without deletion
+
+  // Round-robin tracking
+  assignmentCount Int       @default(0)     // Total candidates assigned
+  lastAssignedAt  DateTime?                 // For tie-breaking
+
+  // Relationships
+  assignments     CalendlyLinkAssignment[]
+
+  // Metadata
+  tenantId        String    @default("development")
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([tenantId, isActive])
+  @@map("recruiter_calendly_links")
+}
+
+/// Tracks which Calendly link was assigned to which candidate
+model CalendlyLinkAssignment {
+  id                      String    @id @default(uuid())
+
+  // Which link was assigned
+  calendlyLinkId          String
+  calendlyLink            RecruiterCalendlyLink @relation(fields: [calendlyLinkId], references: [id], onDelete: Cascade)
+
+  // To which candidate/job
+  candidateProviderId     String                // LinkedIn URN
+  candidateName           String?
+  jobRequisitionId        String?
+  rileyConversationId     String?
+
+  // Outcome tracking
+  linkSentAt              DateTime  @default(now())
+  bookingConfirmed        Boolean   @default(false)
+  bookingConfirmedAt      DateTime?
+
+  // Metadata
+  tenantId                String    @default("development")
+  createdAt               DateTime  @default(now())
+
+  @@index([calendlyLinkId])
+  @@index([candidateProviderId])
+  @@index([tenantId])
+  @@map("calendly_link_assignments")
+}
+
+// =============================================================================
+// OUTREACH SETTINGS (PERSISTED)
+// =============================================================================
+
+/// Stores outreach settings per tenant (replaces in-memory settings)
+model OutreachSettings {
+  id                      String    @id @default(uuid())
+
+  // Auto-pitch settings
+  autoPitchOnAcceptance   Boolean   @default(true)
+  pitchDelayMinutes       Int       @default(0)
+
+  // Follow-up settings
+  followUpEnabled         Boolean   @default(true)
+  followUpDays            Json      @default("[3, 7, 14]")  // Array of days
+  maxFollowUps            Int       @default(3)
+  includeCalendlyInFinal  Boolean   @default(true)
+
+  // AI response settings
+  autoRespondEnabled      Boolean   @default(true)
+  escalateToHumanKeywords Json      @default("[\"salary\", \"compensation\", \"benefits\"]")
+
+  // Metadata
+  tenantId                String    @unique @default("development")
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  @@map("outreach_settings")
+}

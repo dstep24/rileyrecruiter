@@ -17,6 +17,7 @@ import outreachTemplatesRoutes from './routes/outreach-templates.js'; // Outreac
 import outreachRoutes from './routes/outreach.js'; // Outreach tracking routes
 import outreachSettingsRoutes from './routes/outreach-settings.js'; // Outreach settings (autopilot, etc.)
 import notificationsRoutes from './routes/notifications.js'; // Notification routes
+import calendlyRoutes from './routes/calendly.js'; // Calendly link rotation routes
 
 // =============================================================================
 // CREATE APP
@@ -96,6 +97,9 @@ export function createApp() {
 
   // Notifications API
   app.use('/api/notifications', notificationsRoutes);
+
+  // Calendly Link Rotation API
+  app.use('/api/calendly', calendlyRoutes);
 
   // ===========================================================================
   // CORE API ROUTES (analytics, settings, AI, chat, etc.)
