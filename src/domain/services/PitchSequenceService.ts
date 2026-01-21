@@ -181,7 +181,7 @@ export class PitchSequenceService {
         field: edu.field_of_study,
         year: edu.end_year?.toString(),
       })),
-      linkedinUrl: profile?.profile_url || tracker.candidateProfileUrl || '',
+      profileUrl: profile?.profile_url || tracker.candidateProfileUrl || '',
     };
 
     // Build role info
@@ -275,7 +275,7 @@ export class PitchSequenceService {
         experience: [],
         skills: [],
         education: [],
-        linkedinUrl: tracker.candidateProfileUrl || '',
+        profileUrl: tracker.candidateProfileUrl || '',
       },
       originalMessage,
       daysSince,

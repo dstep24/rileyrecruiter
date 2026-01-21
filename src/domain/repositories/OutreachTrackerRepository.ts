@@ -128,7 +128,7 @@ export class OutreachTrackerRepository {
    */
   async markConnectionAccepted(id: string): Promise<OutreachTracker> {
     const tracker = await this.getById(id);
-    const existingHistory = (tracker?.statusHistory as StatusHistoryEntry[]) || [];
+    const existingHistory = (tracker?.statusHistory as unknown as StatusHistoryEntry[]) || [];
 
     const statusHistory: StatusHistoryEntry[] = [
       ...existingHistory,
@@ -154,7 +154,7 @@ export class OutreachTrackerRepository {
    */
   async markPitchPending(id: string): Promise<OutreachTracker> {
     const tracker = await this.getById(id);
-    const existingHistory = (tracker?.statusHistory as StatusHistoryEntry[]) || [];
+    const existingHistory = (tracker?.statusHistory as unknown as StatusHistoryEntry[]) || [];
 
     const statusHistory: StatusHistoryEntry[] = [
       ...existingHistory,
@@ -179,7 +179,7 @@ export class OutreachTrackerRepository {
    */
   async markPitchSent(id: string, rileyConversationId: string): Promise<OutreachTracker> {
     const tracker = await this.getById(id);
-    const existingHistory = (tracker?.statusHistory as StatusHistoryEntry[]) || [];
+    const existingHistory = (tracker?.statusHistory as unknown as StatusHistoryEntry[]) || [];
 
     const statusHistory: StatusHistoryEntry[] = [
       ...existingHistory,
@@ -207,7 +207,7 @@ export class OutreachTrackerRepository {
    */
   async markReplied(id: string): Promise<OutreachTracker> {
     const tracker = await this.getById(id);
-    const existingHistory = (tracker?.statusHistory as StatusHistoryEntry[]) || [];
+    const existingHistory = (tracker?.statusHistory as unknown as StatusHistoryEntry[]) || [];
 
     const statusHistory: StatusHistoryEntry[] = [
       ...existingHistory,
@@ -232,7 +232,7 @@ export class OutreachTrackerRepository {
    */
   async markNoResponse(id: string): Promise<OutreachTracker> {
     const tracker = await this.getById(id);
-    const existingHistory = (tracker?.statusHistory as StatusHistoryEntry[]) || [];
+    const existingHistory = (tracker?.statusHistory as unknown as StatusHistoryEntry[]) || [];
 
     const statusHistory: StatusHistoryEntry[] = [
       ...existingHistory,
@@ -258,7 +258,7 @@ export class OutreachTrackerRepository {
    */
   async markDeclined(id: string, reason?: string): Promise<OutreachTracker> {
     const tracker = await this.getById(id);
-    const existingHistory = (tracker?.statusHistory as StatusHistoryEntry[]) || [];
+    const existingHistory = (tracker?.statusHistory as unknown as StatusHistoryEntry[]) || [];
 
     const statusHistory: StatusHistoryEntry[] = [
       ...existingHistory,
