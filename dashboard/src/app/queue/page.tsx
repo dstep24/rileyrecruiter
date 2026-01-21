@@ -21,7 +21,11 @@ import {
   Trash2,
   Sparkles,
   Brain,
+  ClipboardList,
+  Link2,
 } from 'lucide-react';
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
 
 // =============================================================================
 // TYPES
@@ -48,6 +52,10 @@ interface QueuedCandidate {
     skills: string[];
   };
   errorMessage?: string;
+  // Job requisition linkage for assessments
+  jobRequisitionId?: string;
+  assessmentTemplateId?: string;
+  assessmentUrl?: string;
 }
 
 interface UnipileConfig {
@@ -102,8 +110,7 @@ export default function QueuePage() {
   const [draftText, setDraftText] = useState<string>('');
   const [generatingAI, setGeneratingAI] = useState<Set<string>>(new Set());
   const [hasAiKey, setHasAiKey] = useState<boolean | null>(null);
-
-  const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001/api';
+  const [fetchingAssessment, setFetchingAssessment] = useState<Set<string>>(new Set());
 
   // Load Unipile config, AI key status, and queue from localStorage on mount
   useEffect(() => {
@@ -180,8 +187,12 @@ export default function QueuePage() {
   const generateDefaultMessage = (item: QueuedCandidate): string => {
     const jobTitle = item.searchCriteria?.jobTitle || 'an exciting opportunity';
     const skills = item.searchCriteria?.skills?.slice(0, 3).join(', ') || '';
+    const assessmentNote = item.assessmentUrl
+      ? `\n\nTo help me understand your background better, please complete this brief assessment: ${item.assessmentUrl}`
+      : '';
 
     if (item.messageType === 'connection_request') {
+      // Connection requests have 300 char limit, keep it short
       return `Hi ${item.name.split(' ')[0]},
 
 I came across your profile and was impressed by your experience${item.currentCompany ? ` at ${item.currentCompany}` : ''}. I'm reaching out about ${jobTitle} that I think could be a great match for your background${skills ? ` in ${skills}` : ''}.
@@ -195,9 +206,98 @@ I hope this message finds you well. I came across your profile and was impressed
 
 I'm reaching out about ${jobTitle} that I believe could be a great fit for your skills${skills ? ` in ${skills}` : ''}.
 
-Would you be open to a brief conversation to learn more?
+Would you be open to a brief conversation to learn more?${assessmentNote}
 
 Best regards`;
+  };
+
+  // Fetch or generate assessment link for a candidate
+  const fetchAssessmentLink = async (item: QueuedCandidate): Promise<string | null> => {
+    if (!item.jobRequisitionId) {
+      console.log('[Queue] No job requisition ID for candidate, skipping assessment link');
+      return null;
+    }
+
+    // If already have an assessment URL, return it
+    if (item.assessmentUrl) {
+      return item.assessmentUrl;
+    }
+
+    setFetchingAssessment((prev) => new Set(prev).add(item.id));
+
+    try {
+      // Create a temporary conversation ID for this assessment
+      const conversationId = `queue-${item.id}`;
+
+      const response = await fetch(`${API_BASE}/api/assessments/create-link-for-job`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jobRequisitionId: item.jobRequisitionId,
+          conversationId,
+          candidateName: item.name,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to create assessment link');
+      }
+
+      const data = await response.json();
+
+      if (data.success && data.assessmentLink?.url) {
+        // Update the queue item with the assessment info
+        const updatedQueue = queue.map((q) =>
+          q.id === item.id
+            ? {
+                ...q,
+                assessmentTemplateId: data.templateId,
+                assessmentUrl: data.assessmentLink.url,
+              }
+            : q
+        );
+        saveQueue(updatedQueue);
+
+        return data.assessmentLink.url;
+      }
+
+      return null;
+    } catch (err) {
+      console.error('[Queue] Failed to fetch assessment link:', err);
+      return null;
+    } finally {
+      setFetchingAssessment((prev) => {
+        const next = new Set(prev);
+        next.delete(item.id);
+        return next;
+      });
+    }
+  };
+
+  // Generate assessment link and add to message
+  const addAssessmentToMessage = async (item: QueuedCandidate) => {
+    const url = await fetchAssessmentLink(item);
+    if (url) {
+      // Update the draft to include the assessment link
+      const currentDraft = item.messageDraft || generateDefaultMessage(item);
+      const assessmentNote = `\n\nTo help me understand your background better, please complete this brief assessment: ${url}`;
+
+      // Don't add if already present
+      if (!currentDraft.includes(url)) {
+        const updatedDraft = currentDraft + assessmentNote;
+        const updatedQueue = queue.map((q) =>
+          q.id === item.id ? { ...q, messageDraft: updatedDraft, assessmentUrl: url } : q
+        );
+        saveQueue(updatedQueue);
+
+        // If editing, update the draft text
+        if (editingDraft === item.id) {
+          setDraftText(updatedDraft);
+        }
+      }
+    } else {
+      setError('Could not generate assessment link. Make sure the candidate has a job requisition linked.');
+    }
   };
 
   // Start editing a message draft
@@ -760,18 +860,41 @@ Best regards`;
                               placeholder="Write your message..."
                             />
                             <div className="flex justify-between mt-3">
-                              <button
-                                onClick={() => generateAIMessage(item)}
-                                disabled={generatingAI.has(item.id)}
-                                className="px-3 py-1.5 bg-purple-100 text-purple-700 rounded-lg text-sm hover:bg-purple-200 flex items-center gap-1 disabled:opacity-50"
-                              >
-                                {generatingAI.has(item.id) ? (
-                                  <Loader2 className="h-3 w-3 animate-spin" />
-                                ) : (
-                                  <Sparkles className="h-3 w-3" />
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={() => generateAIMessage(item)}
+                                  disabled={generatingAI.has(item.id)}
+                                  className="px-3 py-1.5 bg-purple-100 text-purple-700 rounded-lg text-sm hover:bg-purple-200 flex items-center gap-1 disabled:opacity-50"
+                                >
+                                  {generatingAI.has(item.id) ? (
+                                    <Loader2 className="h-3 w-3 animate-spin" />
+                                  ) : (
+                                    <Sparkles className="h-3 w-3" />
+                                  )}
+                                  {generatingAI.has(item.id) ? 'Generating...' : 'Regenerate with AI'}
+                                </button>
+                                {item.jobRequisitionId && !item.assessmentUrl && (
+                                  <button
+                                    onClick={() => addAssessmentToMessage(item)}
+                                    disabled={fetchingAssessment.has(item.id)}
+                                    className="px-3 py-1.5 bg-green-100 text-green-700 rounded-lg text-sm hover:bg-green-200 flex items-center gap-1 disabled:opacity-50"
+                                    title="Add pre-screening assessment link to message"
+                                  >
+                                    {fetchingAssessment.has(item.id) ? (
+                                      <Loader2 className="h-3 w-3 animate-spin" />
+                                    ) : (
+                                      <ClipboardList className="h-3 w-3" />
+                                    )}
+                                    Add Assessment
+                                  </button>
                                 )}
-                                {generatingAI.has(item.id) ? 'Generating...' : 'Regenerate with AI'}
-                              </button>
+                                {item.assessmentUrl && (
+                                  <span className="px-3 py-1.5 bg-green-50 text-green-700 rounded-lg text-sm flex items-center gap-1">
+                                    <Link2 className="h-3 w-3" />
+                                    Assessment Added
+                                  </span>
+                                )}
+                              </div>
                               <div className="flex gap-2">
                                 <button
                                   onClick={() => setEditingDraft(null)}

@@ -216,3 +216,14 @@ export {
   type UpdateTemplateInput as UpdateOutreachTemplateInput,
   type TemplateVariables,
 } from './OutreachTemplateService.js';
+
+// AI Assessment Generator (generates assessments from job descriptions)
+export {
+  AIAssessmentGenerator,
+  aiAssessmentGenerator,
+  getAIAssessmentGenerator,
+  resetAIAssessmentGenerator,
+  type JobContext,
+  type GeneratedQuestion,
+  type GeneratedAssessment,
+} from './AIAssessmentGenerator.js';

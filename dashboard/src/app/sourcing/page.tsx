@@ -178,6 +178,10 @@ interface QueuedCandidate {
     jobTitle: string;
     skills: string[];
   };
+  // Job requisition linkage for assessments
+  jobRequisitionId?: string;
+  assessmentTemplateId?: string;
+  assessmentUrl?: string;
 }
 
 interface SearchRun {
@@ -243,6 +247,7 @@ export default function SourcingPage() {
     location: '',
     isFullyRemote: false, // If true, skip location filtering in search
     isContractRole: false, // If true, prioritize candidates with contract/freelance experience
+    usOnlySearch: true, // Default to US only - we don't recruit internationally unless specified
     intakeNotes: '', // Notes from hiring manager conversation - takes precedence over JD
     excludeCompanies: '', // Companies to exclude (e.g., "Google, Facebook, Amazon")
     targetIndustries: '', // Target industries for cultural fit (e.g., "fintech, insurance, banking")
@@ -313,6 +318,7 @@ export default function SourcingPage() {
           location: parsed.customJD.location || '',
           isFullyRemote: (parsed.customJD as { isFullyRemote?: boolean }).isFullyRemote || false,
           isContractRole: (parsed.customJD as { isContractRole?: boolean }).isContractRole || false,
+          usOnlySearch: (parsed.customJD as { usOnlySearch?: boolean }).usOnlySearch !== false, // Default to true
           intakeNotes: (parsed.customJD as { intakeNotes?: string }).intakeNotes || '',
           excludeCompanies: (parsed.customJD as { excludeCompanies?: string }).excludeCompanies || '',
           targetIndustries: (parsed.customJD as { targetIndustries?: string }).targetIndustries || '',
@@ -376,12 +382,87 @@ export default function SourcingPage() {
     }
   }, [parsedCriteria?.booleanQuery]);
 
+  // Track previous JD values to detect changes
+  const prevJDRef = useRef({ title: '', description: '' });
+
+  // Clear parsed criteria and search strategy when job description changes
+  useEffect(() => {
+    const prevTitle = prevJDRef.current.title;
+    const prevDescription = prevJDRef.current.description;
+    const currentTitle = customJD.title;
+    const currentDescription = customJD.description;
+
+    // Only clear if we had previous values (not initial load) and they changed significantly
+    const titleChanged = prevTitle && currentTitle !== prevTitle;
+    const descriptionChanged = prevDescription && currentDescription !== prevDescription;
+
+    if (titleChanged || descriptionChanged) {
+      // Clear the search strategy and parsed criteria when JD changes
+      setParsedCriteria(null);
+      setSearchStrategy(null);
+      setEditableBooleanQuery('');
+      setIsBooleanQueryValid(true);
+    }
+
+    // Update the ref with current values
+    prevJDRef.current = { title: currentTitle, description: currentDescription };
+  }, [customJD.title, customJD.description]);
+
   // Add candidates to the messaging queue
   const addToQueue = async (candidates: SourcedCandidate[]) => {
     setAddingToQueue(true);
     try {
       // Get existing queue from localStorage
       const existingQueue = JSON.parse(localStorage.getItem('riley_messaging_queue') || '[]') as QueuedCandidate[];
+
+      // Generate assessment template - either from job requisition or custom JD context
+      let assessmentTemplateId: string | undefined;
+      let assessmentInfo: { templateId: string; isNew: boolean } | undefined;
+
+      if (selectedReq) {
+        // Use existing job requisition
+        try {
+          console.log('[Sourcing] Generating assessment for job requisition:', selectedReq);
+          const assessmentRes = await fetch(`${API_BASE}/api/assessments/generate-from-job`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ jobRequisitionId: selectedReq }),
+          });
+          const assessmentData = await assessmentRes.json();
+          if (assessmentData.success && assessmentData.templateId) {
+            assessmentTemplateId = assessmentData.templateId;
+            assessmentInfo = { templateId: assessmentData.templateId, isNew: assessmentData.isNew };
+            console.log('[Sourcing] Assessment template ready:', assessmentTemplateId, assessmentInfo.isNew ? '(newly generated)' : '(existing)');
+          }
+        } catch (err) {
+          console.warn('[Sourcing] Failed to generate assessment from job req, continuing without:', err);
+        }
+      } else if (customJD.title && customJD.description) {
+        // Use custom JD context (no DB record)
+        try {
+          console.log('[Sourcing] Generating assessment from custom JD context:', customJD.title);
+          const assessmentRes = await fetch(`${API_BASE}/api/assessments/generate-from-context`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              title: customJD.title,
+              description: customJD.description,
+              requirements: parsedCriteria?.requiredSkills || customJD.skills?.split(',').map(s => s.trim()).filter(Boolean) || [],
+              preferredSkills: parsedCriteria?.preferredSkills || [],
+              location: customJD.location || undefined,
+              locationType: customJD.isFullyRemote ? 'REMOTE' : 'UNSPECIFIED',
+            }),
+          });
+          const assessmentData = await assessmentRes.json();
+          if (assessmentData.success && assessmentData.templateId) {
+            assessmentTemplateId = assessmentData.templateId;
+            assessmentInfo = { templateId: assessmentData.templateId, isNew: true };
+            console.log('[Sourcing] Assessment template generated from context:', assessmentTemplateId);
+          }
+        } catch (err) {
+          console.warn('[Sourcing] Failed to generate assessment from context, continuing without:', err);
+        }
+      }
 
       // Create queue items for each candidate
       const newQueueItems: QueuedCandidate[] = candidates.map(candidate => ({
@@ -403,6 +484,9 @@ export default function SourcingPage() {
           jobTitle: parsedCriteria.titles[0] || customJD.title,
           skills: parsedCriteria.requiredSkills,
         } : undefined,
+        // Include job requisition and assessment for linking
+        jobRequisitionId: selectedReq || undefined,
+        assessmentTemplateId,
       }));
 
       // Add to queue (avoid duplicates by providerId or candidateId)
@@ -439,11 +523,21 @@ export default function SourcingPage() {
       // Check for candidates without provider IDs
       const withoutProviderId = uniqueNewItems.filter(item => !item.providerId);
 
+      // Build success message
+      let successMessage = `Added ${uniqueNewItems.length} candidate(s) to messaging queue.`;
+
+      // Add assessment info if generated
+      if (assessmentInfo) {
+        successMessage += assessmentInfo.isNew
+          ? '\n\n✅ AI-generated pre-screening assessment created for this role.'
+          : '\n\n✅ Pre-screening assessment linked (existing template).';
+      }
+
       // Show success message with warning if needed
       if (withoutProviderId.length > 0) {
-        alert(`Added ${uniqueNewItems.length} candidate(s) to messaging queue.\n\n⚠️ Warning: ${withoutProviderId.length} candidate(s) are missing LinkedIn IDs and cannot be messaged. This may happen with demo/mock data. Re-source these candidates with LinkedIn connected to get their IDs.`);
+        alert(`${successMessage}\n\n⚠️ Warning: ${withoutProviderId.length} candidate(s) are missing LinkedIn IDs and cannot be messaged. This may happen with demo/mock data. Re-source these candidates with LinkedIn connected to get their IDs.`);
       } else {
-        alert(`Added ${uniqueNewItems.length} candidate(s) to messaging queue. Go to Approval Queue to review and send messages.`);
+        alert(`${successMessage}\n\nGo to Approval Queue to review and send messages.`);
       }
     } catch (error) {
       console.error('Failed to add to queue:', error);
@@ -1486,11 +1580,11 @@ export default function SourcingPage() {
       // This ensures the actual Boolean syntax is sent to LinkedIn, not simplified keywords
       //
       // API Length Limits (empirically determined):
-      // - Classic API: ~100 characters (very strict - LinkedIn rejects larger payloads)
+      // - Classic API: ~60 characters (VERY strict - LinkedIn Classic rejects even 93 chars!)
       // - Sales Navigator: ~500 characters
       // - Recruiter: ~1000 characters
       const API_KEYWORD_LIMITS: Record<string, number> = {
-        classic: 100,  // Reduced from 150 due to content_too_large errors
+        classic: 60,  // Reduced from 100 - Classic API is extremely restrictive
         sales_navigator: 500,
         recruiter: 1000,
       };
@@ -1500,7 +1594,45 @@ export default function SourcingPage() {
           return query;
         }
 
-        // Try to truncate at a word boundary while keeping valid Boolean syntax
+        // For very short limits (Classic API), create a simplified query
+        if (maxLength <= 60) {
+          // Extract the most important term - usually the job title
+          // Try to find a quoted phrase first
+          const quotedMatch = query.match(/"([^"]+)"/);
+          if (quotedMatch && quotedMatch[1]) {
+            const title = `"${quotedMatch[1]}"`;
+            if (title.length <= maxLength) {
+              console.log(`[Sourcing] Classic API: Using just title "${quotedMatch[1]}" (${title.length} chars)`);
+              return title;
+            }
+          }
+
+          // Fall back to first term before AND/OR
+          const firstTerm = query.split(/\s+(?:AND|OR)\s+/)[0]?.trim();
+          if (firstTerm && firstTerm.length <= maxLength) {
+            // Balance parentheses
+            let balanced = firstTerm;
+            const openCount = (balanced.match(/\(/g) || []).length;
+            const closeCount = (balanced.match(/\)/g) || []).length;
+            if (openCount > closeCount) {
+              balanced += ')'.repeat(openCount - closeCount);
+            }
+            console.log(`[Sourcing] Classic API: Using first term (${balanced.length} chars):`, balanced);
+            return balanced;
+          }
+
+          // Last resort: just use the first 55 chars + balance parens
+          let simple = query.substring(0, 55).replace(/\s+\S*$/, '').trim();
+          const openCount = (simple.match(/\(/g) || []).length;
+          const closeCount = (simple.match(/\)/g) || []).length;
+          if (openCount > closeCount) {
+            simple += ')'.repeat(openCount - closeCount);
+          }
+          console.log(`[Sourcing] Classic API: Truncated to ${simple.length} chars`);
+          return simple;
+        }
+
+        // For longer limits, try to truncate at a word boundary while keeping valid Boolean syntax
         let truncated = query.substring(0, maxLength);
 
         // Try to truncate at an OR boundary to keep the query valid
@@ -1508,14 +1640,15 @@ export default function SourcingPage() {
         const lastAnd = truncated.lastIndexOf(' AND ');
         const lastNot = truncated.lastIndexOf(' NOT ');
 
-        // Find the best truncation point (the rightmost operator boundary that's > 50 chars)
+        // Find the best truncation point (the rightmost operator boundary that's > 50% of the limit)
+        const minBoundary = maxLength * 0.5;
         const bestBoundary = Math.max(
-          lastOr > 50 ? lastOr : 0,
-          lastAnd > 50 ? lastAnd : 0,
-          lastNot > 50 ? lastNot : 0
+          lastOr > minBoundary ? lastOr : 0,
+          lastAnd > minBoundary ? lastAnd : 0,
+          lastNot > minBoundary ? lastNot : 0
         );
 
-        if (bestBoundary > 50) {
+        if (bestBoundary > minBoundary) {
           truncated = truncated.substring(0, bestBoundary);
         } else {
           truncated = truncated.replace(/\s+\S*$/, '').trim();
@@ -1680,10 +1813,22 @@ export default function SourcingPage() {
       // Get location from parsed criteria or custom JD
       const searchLocation = parsedCriteria.locations?.[0] || customJD.location;
 
+      // LinkedIn geo ID for United States
+      const US_GEO_ID = '103644278';
+
       // Look up location ID if location is specified
       // Location IDs can be numeric (preferred) or strings depending on Unipile's response
       let locationIds: (string | number)[] = [];
       let resolvedLocationName: string | null = null;
+
+      // If US Only is enabled (default), always apply US geo filter
+      if (customJD.usOnlySearch) {
+        locationIds = [US_GEO_ID];
+        resolvedLocationName = 'United States';
+        console.log(`[Sourcing] ✓ US Only search enabled - using US geo ID: ${US_GEO_ID}`);
+      }
+
+      // If a specific location is also provided, look it up and use it instead (more specific)
       if (searchLocation) {
         setSearchRun((prev) => prev ? { ...prev, progress: 15 } : null);
         console.log(`[Sourcing] Looking up location ID for: "${searchLocation}"`);
@@ -1767,14 +1912,25 @@ export default function SourcingPage() {
           }
         }
 
-        if (locationIds.length === 0) {
+        // Check if we found a specific city, or if we're falling back to US-only
+        if (locationIds.length === 1 && locationIds[0] === US_GEO_ID && customJD.usOnlySearch) {
+          console.log(`[Sourcing] ⚠ Could not resolve specific city "${searchLocation}" - using US-wide search instead`);
+        } else if (locationIds.length === 0) {
           console.warn(`[Sourcing] ⚠ Could not resolve location ID for "${searchLocation}" after trying all variants`);
         }
         } catch (err) {
           console.warn('[Sourcing] Location lookup error:', err);
+          // If lookup fails but US Only is enabled, we still have the US ID
+          if (customJD.usOnlySearch && (locationIds.length === 0 || (locationIds.length === 1 && locationIds[0] !== US_GEO_ID))) {
+            locationIds = [US_GEO_ID];
+            resolvedLocationName = 'United States';
+            console.log(`[Sourcing] Falling back to US-wide search due to lookup error`);
+          }
         }
+      } else if (!customJD.usOnlySearch) {
+        console.log('[Sourcing] No location specified and US Only disabled - searching worldwide');
       } else {
-        console.log('[Sourcing] No location specified for search');
+        console.log('[Sourcing] No specific location - using US-only filter');
       }
 
       for (const api of apisToTry) {
@@ -2138,6 +2294,7 @@ export default function SourcingPage() {
       location: '',
       isFullyRemote: false,
       isContractRole: false,
+      usOnlySearch: true, // Default to US only
       intakeNotes: '',
       excludeCompanies: '',
       targetIndustries: '',
@@ -2307,32 +2464,44 @@ export default function SourcingPage() {
                   <label className="block text-sm font-medium text-gray-700">
                     Location
                   </label>
-                  <label className="flex items-center gap-1.5 text-sm cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={customJD.isFullyRemote}
-                      onChange={(e) => setCustomJD({ ...customJD, isFullyRemote: e.target.checked })}
-                      className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
-                    />
-                    <Globe className="h-3.5 w-3.5 text-blue-600" />
-                    <span className="text-gray-600">Fully Remote</span>
-                  </label>
-                  <label className="flex items-center gap-1.5 text-sm cursor-pointer ml-4" title="Prioritize candidates with contract/freelance experience in scoring">
-                    <input
-                      type="checkbox"
-                      checked={customJD.isContractRole}
-                      onChange={(e) => setCustomJD({ ...customJD, isContractRole: e.target.checked })}
-                      className="w-4 h-4 text-orange-600 border-gray-300 rounded focus:ring-orange-500"
-                    />
-                    <Briefcase className="h-3.5 w-3.5 text-orange-600" />
-                    <span className="text-gray-600">Contract Role</span>
-                  </label>
+                  <div className="flex items-center gap-3">
+                    <label className="flex items-center gap-1.5 text-sm cursor-pointer" title="Restrict search to United States only (default - uncheck for international)">
+                      <input
+                        type="checkbox"
+                        checked={customJD.usOnlySearch}
+                        onChange={(e) => setCustomJD({ ...customJD, usOnlySearch: e.target.checked })}
+                        className="w-4 h-4 text-red-600 border-gray-300 rounded focus:ring-red-500"
+                      />
+                      <MapPin className="h-3.5 w-3.5 text-red-600" />
+                      <span className="text-gray-600">US Only</span>
+                    </label>
+                    <label className="flex items-center gap-1.5 text-sm cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={customJD.isFullyRemote}
+                        onChange={(e) => setCustomJD({ ...customJD, isFullyRemote: e.target.checked })}
+                        className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+                      />
+                      <Globe className="h-3.5 w-3.5 text-blue-600" />
+                      <span className="text-gray-600">Fully Remote</span>
+                    </label>
+                    <label className="flex items-center gap-1.5 text-sm cursor-pointer" title="Prioritize candidates with contract/freelance experience in scoring">
+                      <input
+                        type="checkbox"
+                        checked={customJD.isContractRole}
+                        onChange={(e) => setCustomJD({ ...customJD, isContractRole: e.target.checked })}
+                        className="w-4 h-4 text-orange-600 border-gray-300 rounded focus:ring-orange-500"
+                      />
+                      <Briefcase className="h-3.5 w-3.5 text-orange-600" />
+                      <span className="text-gray-600">Contract Role</span>
+                    </label>
+                  </div>
                 </div>
                 <input
                   type="text"
                   value={customJD.location}
                   onChange={(e) => setCustomJD({ ...customJD, location: e.target.value })}
-                  placeholder={customJD.isFullyRemote ? "Location not required for remote roles" : "e.g., San Francisco, CA"}
+                  placeholder={customJD.isFullyRemote ? "Location not required for remote roles" : (customJD.usOnlySearch ? "e.g., San Francisco, CA (US search)" : "e.g., London, UK")}
                   disabled={customJD.isFullyRemote}
                   className={`w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 ${
                     customJD.isFullyRemote ? 'bg-gray-50 text-gray-400' : ''

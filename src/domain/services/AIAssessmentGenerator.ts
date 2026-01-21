@@ -446,4 +446,16 @@ export function resetAIAssessmentGenerator(): void {
   instance = null;
 }
 
-export const aiAssessmentGenerator = getAIAssessmentGenerator();
+// Lazy-loaded singleton - only created when accessed
+// This prevents crashes at module load time when ANTHROPIC_API_KEY is not set
+export const aiAssessmentGenerator = {
+  get instance(): AIAssessmentGenerator {
+    return getAIAssessmentGenerator();
+  },
+  generateAssessment: (...args: Parameters<AIAssessmentGenerator['generateAssessment']>) =>
+    getAIAssessmentGenerator().generateAssessment(...args),
+  generateAndSaveAssessment: (...args: Parameters<AIAssessmentGenerator['generateAndSaveAssessment']>) =>
+    getAIAssessmentGenerator().generateAndSaveAssessment(...args),
+  getOrGenerateAssessment: (...args: Parameters<AIAssessmentGenerator['getOrGenerateAssessment']>) =>
+    getAIAssessmentGenerator().getOrGenerateAssessment(...args),
+};
