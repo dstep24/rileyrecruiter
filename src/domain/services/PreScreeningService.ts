@@ -30,6 +30,7 @@ export interface CreateTemplateInput {
   name: string;
   description?: string;
   roleType?: string;
+  companyName?: string;  // Company name for internal tracking (NOT shown to candidates)
   questions: CreateQuestionInput[];
 }
 
@@ -119,6 +120,7 @@ export class PreScreeningService {
         name: input.name,
         description: input.description,
         roleType: input.roleType,
+        companyName: input.companyName,
         questions: {
           create: input.questions.map((q, index) => ({
             questionText: q.questionText,

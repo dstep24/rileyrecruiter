@@ -63,17 +63,12 @@ interface QueuedCandidate {
   pitchSentAt?: string;
 }
 
-interface JobRequisition {
-  id: string;
-  title: string;
-  status: string;
-}
-
 interface AssessmentTemplate {
   id: string;
   name: string;
   jobTitle?: string;
-  status: string;
+  companyName?: string;
+  isActive: boolean;
 }
 
 interface UnipileConfig {
@@ -170,9 +165,9 @@ export default function QueuePage() {
     } catch {
       // Use mock data for demo
       setAssessmentTemplates([
-        { id: 'tmpl-1', name: 'Senior Software Engineer Assessment', jobTitle: 'Senior Software Engineer', status: 'active' },
-        { id: 'tmpl-2', name: 'Product Manager Assessment', jobTitle: 'Product Manager', status: 'active' },
-        { id: 'tmpl-3', name: 'Data Scientist Assessment', jobTitle: 'Data Scientist', status: 'active' },
+        { id: 'tmpl-1', name: 'Senior Software Engineer Assessment', jobTitle: 'Senior Software Engineer', companyName: 'Acme Corp', isActive: true },
+        { id: 'tmpl-2', name: 'Product Manager Assessment', jobTitle: 'Product Manager', companyName: 'TechStartup Inc', isActive: true },
+        { id: 'tmpl-3', name: 'Data Scientist Assessment', jobTitle: 'Data Scientist', isActive: true },
       ]);
     }
   };
@@ -1241,9 +1236,9 @@ Best regards`;
                                     defaultValue=""
                                   >
                                     <option value="" disabled>Select an assessment...</option>
-                                    {assessmentTemplates.filter(t => t.status === 'active').map((template) => (
+                                    {assessmentTemplates.filter(t => t.isActive).map((template) => (
                                       <option key={template.id} value={template.id}>
-                                        {template.name}
+                                        {template.name}{template.companyName ? ` (${template.companyName})` : ''}
                                       </option>
                                     ))}
                                   </select>

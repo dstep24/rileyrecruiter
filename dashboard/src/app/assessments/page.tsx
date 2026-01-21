@@ -39,6 +39,7 @@ interface Template {
   name: string;
   description?: string;
   roleType?: string;
+  companyName?: string;  // Company name for internal tracking (NOT shown to candidates)
   isActive: boolean;
   questions: Question[];
   createdAt: string;
@@ -123,6 +124,7 @@ export default function AssessmentsPage() {
     name: '',
     description: '',
     roleType: 'engineering',
+    companyName: '',
     questions: [...DEFAULT_QUESTIONS],
   });
   const [creating, setCreating] = useState(false);
@@ -181,6 +183,7 @@ export default function AssessmentsPage() {
           name: '',
           description: '',
           roleType: 'engineering',
+          companyName: '',
           questions: [...DEFAULT_QUESTIONS],
         });
       } else {
@@ -394,6 +397,11 @@ export default function AssessmentsPage() {
                           {template.roleType}
                         </span>
                       )}
+                      {template.companyName && (
+                        <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs">
+                          {template.companyName}
+                        </span>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -587,6 +595,24 @@ export default function AssessmentsPage() {
                     <option value="operations">Operations</option>
                     <option value="other">Other</option>
                   </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Company Name (Internal Only)
+                  </label>
+                  <input
+                    type="text"
+                    value={newTemplate.companyName}
+                    onChange={(e) =>
+                      setNewTemplate((prev) => ({ ...prev, companyName: e.target.value }))
+                    }
+                    className="w-full px-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500"
+                    placeholder="e.g., Acme Corp (not visible to candidates)"
+                  />
+                  <p className="mt-1 text-xs text-gray-500">
+                    This is for internal tracking only - candidates will NOT see this.
+                  </p>
                 </div>
               </div>
 

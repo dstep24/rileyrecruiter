@@ -245,6 +245,7 @@ export default function SourcingPage() {
     description: '',
     skills: '',
     location: '',
+    companyName: '', // Company name for internal tracking (NOT shown to candidates in assessments)
     isFullyRemote: false, // If true, skip location filtering in search
     isContractRole: false, // If true, prioritize candidates with contract/freelance experience
     usOnlySearch: true, // Default to US only - we don't recruit internationally unless specified
@@ -316,6 +317,7 @@ export default function SourcingPage() {
           description: parsed.customJD.description || '',
           skills: parsed.customJD.skills || '',
           location: parsed.customJD.location || '',
+          companyName: (parsed.customJD as { companyName?: string }).companyName || '',
           isFullyRemote: (parsed.customJD as { isFullyRemote?: boolean }).isFullyRemote || false,
           isContractRole: (parsed.customJD as { isContractRole?: boolean }).isContractRole || false,
           usOnlySearch: (parsed.customJD as { usOnlySearch?: boolean }).usOnlySearch !== false, // Default to true
@@ -451,6 +453,7 @@ export default function SourcingPage() {
               preferredSkills: parsedCriteria?.preferredSkills || [],
               location: customJD.location || undefined,
               locationType: customJD.isFullyRemote ? 'REMOTE' : 'UNSPECIFIED',
+              companyName: customJD.companyName || undefined,  // Company name for internal tracking
             }),
           });
           const assessmentData = await assessmentRes.json();
@@ -2383,6 +2386,7 @@ export default function SourcingPage() {
       description: '',
       skills: '',
       location: '',
+      companyName: '',
       isFullyRemote: false,
       isContractRole: false,
       usOnlySearch: true, // Default to US only
@@ -2504,6 +2508,22 @@ export default function SourcingPage() {
                   placeholder="e.g., Senior Software Engineer"
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Company Name (Internal Only)
+                </label>
+                <input
+                  type="text"
+                  value={customJD.companyName}
+                  onChange={(e) => setCustomJD({ ...customJD, companyName: e.target.value })}
+                  placeholder="e.g., Acme Corp (not visible to candidates)"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+                <p className="mt-1 text-xs text-gray-500">
+                  For internal tracking only - candidates will NOT see this in assessments.
+                </p>
               </div>
 
               <div>
