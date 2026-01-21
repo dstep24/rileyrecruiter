@@ -15,6 +15,7 @@ import { OutreachTrackerRepository } from '../../domain/repositories/OutreachTra
 import { RileyAutoResponder } from '../../domain/services/RileyAutoResponder.js';
 import { PitchSequenceService } from '../../domain/services/PitchSequenceService.js';
 import { outreachSettingsService } from '../../domain/services/OutreachSettingsService.js';
+import { getConversationOrchestrator } from '../../domain/services/ConversationOrchestrator.js';
 
 const router = Router();
 
@@ -357,9 +358,10 @@ async function handleIncomingMessage(
   }
 
   // =========================================================================
-  // STEP 4: Generate and send auto-response
+  // STEP 4: Generate and send auto-response using ConversationOrchestrator
+  // This now includes Calendly link rotation and booking intent detection
   // =========================================================================
-  console.log('[Webhook] Generating Riley auto-response...');
+  console.log('[Webhook] Processing with ConversationOrchestrator...');
 
   try {
     // Get the full conversation context from database
@@ -370,29 +372,40 @@ async function handleIncomingMessage(
       return;
     }
 
-    // Generate AI response
-    const response = await rileyAutoResponder.generateResponse({
+    // Use ConversationOrchestrator for intelligent response generation
+    // This handles:
+    // - AI response generation
+    // - Booking intent detection
+    // - Calendly link rotation (round-robin)
+    // - Escalation keyword detection
+    const orchestrator = getConversationOrchestrator();
+    const result = await orchestrator.handleIncomingMessage({
       conversation,
-      incomingMessage: event.messageText || '',
+      message: event.messageText || '',
+      messageId: event.messageId,
     });
 
-    if (response.shouldEscalate) {
-      console.log('[Webhook] AI decided to escalate:', response.escalationReason);
-      await rileyConversationRepo.escalate(event.chatId, response.escalationReason || 'AI escalation');
+    // Handle escalation
+    if (result.shouldEscalate) {
+      console.log('[Webhook] Orchestrator triggered escalation:', result.escalationReason);
+      await rileyConversationRepo.escalate(event.chatId, result.escalationReason || 'Orchestrator escalation');
       event.type = 'escalation_required';
       pendingResponses.set(event.chatId, event);
       return;
     }
 
-    if (!response.message) {
-      console.log('[Webhook] AI generated empty response - skipping');
+    // Check if we should send a response
+    if (!result.shouldSend || !result.response) {
+      console.log('[Webhook] No response to send');
       return;
     }
 
-    console.log('[Webhook] Generated response:', response.message.substring(0, 100));
+    console.log('[Webhook] Generated response:', result.response.substring(0, 100));
+    if (result.calendlyLink) {
+      console.log('[Webhook] Included Calendly link from:', result.recruiterName);
+    }
 
     // Send the reply via Unipile
-    // We need Unipile config - check if it's available from environment or stored
     const unipileConfig = {
       apiKey: process.env.UNIPILE_API_KEY,
       dsn: process.env.UNIPILE_DSN,
@@ -401,12 +414,13 @@ async function handleIncomingMessage(
 
     if (!unipileConfig.apiKey || !unipileConfig.dsn) {
       console.log('[Webhook] Unipile config not available - storing response for manual send');
-      // Store the generated response for manual review/send
       pendingResponses.set(event.chatId, {
         ...event,
         metadata: {
           ...event.metadata,
-          generatedResponse: response.message,
+          generatedResponse: result.response,
+          calendlyLink: result.calendlyLink,
+          recruiterName: result.recruiterName,
           generatedAt: new Date().toISOString(),
         },
       });
@@ -417,19 +431,20 @@ async function handleIncomingMessage(
     const { UnipileClient } = await import('../../integrations/linkedin/UnipileClient.js');
     const client = new UnipileClient(unipileConfig as { apiKey: string; dsn: string; accountId: string });
 
-    const sentMessage = await client.replyToChat(event.chatId, response.message);
+    const sentMessage = await client.replyToChat(event.chatId, result.response);
     console.log('[Webhook] Sent auto-response, message ID:', sentMessage.id);
 
     // Store Riley's response in database
     await rileyConversationRepo.addRileyResponse(
       event.chatId,
-      response.message,
+      result.response,
       sentMessage.id
     );
 
-    // Update stage if suggested
-    if (response.suggestedStage) {
-      await rileyConversationRepo.updateStage(event.chatId, response.suggestedStage);
+    // Update stage if changed (e.g., to SCHEDULING when Calendly link sent)
+    if (result.newStage) {
+      await rileyConversationRepo.updateStage(event.chatId, result.newStage);
+      console.log('[Webhook] Updated conversation stage to:', result.newStage);
     }
 
     // Log the sent message event
@@ -439,10 +454,14 @@ async function handleIncomingMessage(
       chatId: event.chatId,
       accountId: payload.account_id,
       platform: 'linkedin',
-      messageText: response.message,
+      messageText: result.response,
       messageId: sentMessage.id,
       timestamp: new Date(),
-      metadata: { autoGenerated: true, confidence: response.confidence },
+      metadata: {
+        autoGenerated: true,
+        calendlyLink: result.calendlyLink,
+        recruiterName: result.recruiterName,
+      },
     };
     conversationEvents.push(responseEvent);
 

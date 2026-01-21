@@ -227,3 +227,46 @@ export {
   type GeneratedQuestion,
   type GeneratedAssessment,
 } from './AIAssessmentGenerator.js';
+
+// Calendly Link Rotation Service
+export {
+  CalendlyRotatorService,
+  getCalendlyRotatorService,
+  resetCalendlyRotatorService,
+  calendlyRotatorService,
+  type CreateLinkInput,
+  type UpdateLinkInput,
+  type RecordAssignmentInput,
+  type CalendlyStats,
+} from './CalendlyRotatorService.js';
+
+// Booking Intent Detector Service
+export {
+  BookingIntentDetector,
+  getBookingIntentDetector,
+  resetBookingIntentDetector,
+  bookingIntentDetector,
+  type ConversationMessage as BookingConversationMessage,
+  type IntentDetectionResult,
+} from './BookingIntentDetector.js';
+
+// Conversation Orchestrator (coordinates AI response, booking detection, Calendly)
+export {
+  ConversationOrchestrator,
+  getConversationOrchestrator,
+  resetConversationOrchestrator,
+  conversationOrchestrator,
+  type OrchestratorInput,
+  type OrchestratorResult,
+  type FollowUpInput,
+  type FollowUpResult,
+} from './ConversationOrchestrator.js';
+
+// Outreach Settings Service (database-persisted)
+export {
+  getOutreachSettingsService,
+  resetOutreachSettingsService,
+  outreachSettingsService,
+  type OutreachSettings,
+  type OutreachSettingsUpdate,
+} from './OutreachSettingsService.js';
