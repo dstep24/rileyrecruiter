@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { RefreshCw, Wifi, WifiOff, Save, Check, AlertCircle, X, ExternalLink, Key, Sparkles, Eye, EyeOff, Brain, Loader2 } from 'lucide-react';
+import { RefreshCw, Wifi, WifiOff, Save, Check, AlertCircle, X, ExternalLink, Key, Sparkles, Eye, EyeOff, Brain, Loader2, Zap } from 'lucide-react';
 import { useAnthropicApiKey } from '@/components/AnthropicApiKeyModal';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
@@ -23,6 +23,7 @@ interface Settings {
     level: string;
     approvalRequired: string[];
     autoApprove: string[];
+    autopilotMode: boolean;
   };
   integrations: {
     ats: { connected: boolean; provider: string; lastSync?: string };

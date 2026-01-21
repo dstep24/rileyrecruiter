@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
@@ -20,9 +20,11 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+
 const navigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
-  { name: 'Approval Queue', href: '/queue', icon: CheckSquare },
+  { name: 'Approval Queue', href: '/queue', icon: CheckSquare, showNotifications: true },
   { name: 'Sourcing', href: '/sourcing', icon: Search },
   { name: 'Conversations', href: '/conversations', icon: MessageSquare },
   { name: 'Assessments', href: '/assessments', icon: ClipboardList },
@@ -37,6 +39,20 @@ const navigation = [
 export function Sidebar() {
   const pathname = usePathname();
   const [hasAiKey, setHasAiKey] = useState<boolean | null>(null);
+  const [notificationCount, setNotificationCount] = useState(0);
+
+  // Fetch notification count
+  const fetchNotifications = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/notifications/count`);
+      if (response.ok) {
+        const data = await response.json();
+        setNotificationCount(data.count || 0);
+      }
+    } catch {
+      // Silently fail - notifications are not critical
+    }
+  }, []);
 
   // Check for AI key on mount and when storage changes
   useEffect(() => {
@@ -57,6 +73,13 @@ export function Sidebar() {
     window.addEventListener('storage', handleStorage);
     return () => window.removeEventListener('storage', handleStorage);
   }, []);
+
+  // Fetch notifications on mount and periodically
+  useEffect(() => {
+    fetchNotifications();
+    const interval = setInterval(fetchNotifications, 30000); // Every 30 seconds
+    return () => clearInterval(interval);
+  }, [fetchNotifications]);
 
   return (
     <div className="flex h-full w-64 flex-col bg-gray-900">
@@ -97,6 +120,7 @@ export function Sidebar() {
       <nav className="flex-1 space-y-1 px-3 py-4">
         {navigation.map((item) => {
           const isActive = pathname === item.href || pathname.startsWith(`${item.href}/`);
+          const showBadge = item.showNotifications && notificationCount > 0;
           return (
             <Link
               key={item.name}
@@ -114,7 +138,12 @@ export function Sidebar() {
                   isActive ? 'text-white' : 'text-gray-400 group-hover:text-white'
                 )}
               />
-              {item.name}
+              <span className="flex-1">{item.name}</span>
+              {showBadge && (
+                <span className="ml-2 flex h-5 min-w-[20px] items-center justify-center rounded-full bg-red-500 px-1.5 text-xs font-medium text-white">
+                  {notificationCount > 99 ? '99+' : notificationCount}
+                </span>
+              )}
             </Link>
           );
         })}

@@ -180,9 +180,12 @@ export default function QueuePage() {
     setQueue(newQueue);
   };
 
-  // Filter for pending items
+  // Filter queue items by status
   const pendingItems = queue.filter((item) => item.status === 'pending');
   const sentItems = queue.filter((item) => item.status === 'sent');
+  const acceptedItems = queue.filter((item) => item.status === 'connection_accepted' || item.status === 'pitch_pending');
+  const pitchSentItems = queue.filter((item) => item.status === 'pitch_sent');
+  const repliedItems = queue.filter((item) => item.status === 'replied');
   const failedItems = queue.filter((item) => item.status === 'failed');
 
   const toggleItemSelection = (itemId: string) => {
@@ -477,6 +480,37 @@ Best regards`;
         }
 
         console.log(`[Queue] Connection request ${item.messageType === 'connection_only' ? '(no message)' : 'with message'} sent to ${item.name}`);
+
+        // Create outreach tracker for connection requests
+        try {
+          const trackerResponse = await fetch(`${API_BASE}/api/outreach/track`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              candidateProviderId: item.providerId,
+              candidateName: item.name,
+              candidateProfileUrl: item.profileUrl,
+              outreachType: item.messageType === 'connection_only' ? 'CONNECTION_ONLY' : 'CONNECTION_REQUEST',
+              messageContent: item.messageType === 'connection_request' ? messageText : undefined,
+              jobRequisitionId: item.jobRequisitionId,
+              jobTitle: item.searchCriteria?.jobTitle,
+              assessmentTemplateId: item.assessmentTemplateId,
+              sourceQueueItemId: item.id,
+            }),
+          });
+
+          if (trackerResponse.ok) {
+            const trackerData = await trackerResponse.json();
+            console.log(`[Queue] Created outreach tracker: ${trackerData.tracker?.id}`);
+            // Store tracker ID with the queue item
+            item.trackerId = trackerData.tracker?.id;
+          } else {
+            console.warn('[Queue] Failed to create outreach tracker, continuing anyway');
+          }
+        } catch (trackerErr) {
+          console.warn('[Queue] Error creating outreach tracker:', trackerErr);
+          // Don't fail the send if tracker creation fails
+        }
       } else {
         // Send InMail or direct message via starting a new chat
         const response = await fetch(`${apiUrl}/chats`, {
@@ -576,8 +610,11 @@ Best regards`;
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Messaging Queue</h1>
           <p className="text-gray-600">
-            {pendingItems.length} candidates pending outreach
+            {pendingItems.length} pending
             {sentItems.length > 0 && ` • ${sentItems.length} sent`}
+            {acceptedItems.length > 0 && ` • ${acceptedItems.length} connected`}
+            {pitchSentItems.length > 0 && ` • ${pitchSentItems.length} pitched`}
+            {repliedItems.length > 0 && ` • ${repliedItems.length} replied`}
             {failedItems.length > 0 && ` • ${failedItems.length} failed`}
           </p>
         </div>
@@ -1053,13 +1090,123 @@ Best regards`;
         </div>
       )}
 
+      {/* Connection Accepted - Ready for Pitch */}
+      {acceptedItems.length > 0 && (
+        <div className="bg-white rounded-lg border border-emerald-200 overflow-hidden">
+          <div className="px-4 py-3 bg-emerald-50 border-b border-emerald-200">
+            <h3 className="font-medium text-emerald-800 flex items-center gap-2">
+              <UserPlus className="h-4 w-4" />
+              Connection Accepted ({acceptedItems.length})
+              <span className="ml-2 px-2 py-0.5 bg-emerald-200 text-emerald-800 rounded-full text-xs">
+                Ready to Pitch
+              </span>
+            </h3>
+          </div>
+          <div className="divide-y divide-gray-100">
+            {acceptedItems.map((item) => (
+              <div key={item.id} className="flex items-center gap-4 px-4 py-3">
+                <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-600 text-sm font-medium">
+                  {item.name.split(' ').map((n) => n[0]).join('')}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-gray-900 truncate">{item.name}</p>
+                  <p className="text-xs text-gray-500">{item.currentTitle} {item.currentCompany && `at ${item.currentCompany}`}</p>
+                </div>
+                <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${statusColors[item.status]}`}>
+                  {statusLabels[item.status]}
+                </span>
+                {item.profileUrl && (
+                  <a
+                    href={item.profileUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="p-1.5 text-gray-400 hover:text-blue-600 rounded-lg hover:bg-blue-50"
+                    title="View LinkedIn Profile"
+                  >
+                    <ExternalLink className="h-4 w-4" />
+                  </a>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Pitch Sent - Awaiting Response */}
+      {pitchSentItems.length > 0 && (
+        <div className="bg-white rounded-lg border border-indigo-200 overflow-hidden">
+          <div className="px-4 py-3 bg-indigo-50 border-b border-indigo-200">
+            <h3 className="font-medium text-indigo-800 flex items-center gap-2">
+              <MessageSquare className="h-4 w-4" />
+              Pitch Sent ({pitchSentItems.length})
+              <span className="ml-2 px-2 py-0.5 bg-indigo-200 text-indigo-800 rounded-full text-xs">
+                Awaiting Response
+              </span>
+            </h3>
+          </div>
+          <div className="divide-y divide-gray-100">
+            {pitchSentItems.map((item) => (
+              <div key={item.id} className="flex items-center gap-4 px-4 py-3">
+                <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-600 text-sm font-medium">
+                  {item.name.split(' ').map((n) => n[0]).join('')}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-gray-900 truncate">{item.name}</p>
+                  <p className="text-xs text-gray-500">{item.currentTitle} {item.currentCompany && `at ${item.currentCompany}`}</p>
+                </div>
+                <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${statusColors.pitch_sent}`}>
+                  Pitch Sent
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Replied - Candidates who responded */}
+      {repliedItems.length > 0 && (
+        <div className="bg-white rounded-lg border border-cyan-200 overflow-hidden">
+          <div className="px-4 py-3 bg-cyan-50 border-b border-cyan-200">
+            <h3 className="font-medium text-cyan-800 flex items-center gap-2">
+              <MessageSquare className="h-4 w-4" />
+              Replied ({repliedItems.length})
+              <span className="ml-2 px-2 py-0.5 bg-cyan-200 text-cyan-800 rounded-full text-xs">
+                In Conversation
+              </span>
+            </h3>
+          </div>
+          <div className="divide-y divide-gray-100">
+            {repliedItems.map((item) => (
+              <div key={item.id} className="flex items-center gap-4 px-4 py-3">
+                <div className="w-8 h-8 rounded-full bg-cyan-100 flex items-center justify-center text-cyan-600 text-sm font-medium">
+                  {item.name.split(' ').map((n) => n[0]).join('')}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-gray-900 truncate">{item.name}</p>
+                  <p className="text-xs text-gray-500">{item.currentTitle} {item.currentCompany && `at ${item.currentCompany}`}</p>
+                </div>
+                <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${statusColors.replied}`}>
+                  Replied
+                </span>
+                <a
+                  href="/conversations"
+                  className="px-3 py-1 text-xs bg-cyan-100 text-cyan-700 rounded-lg hover:bg-cyan-200"
+                >
+                  View Conversation
+                </a>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Sent Items */}
       {sentItems.length > 0 && (
         <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
           <div className="px-4 py-3 bg-green-50 border-b border-gray-200">
             <h3 className="font-medium text-green-800 flex items-center gap-2">
               <Check className="h-4 w-4" />
-              Sent ({sentItems.length})
+              Awaiting Connection ({sentItems.length})
             </h3>
           </div>
           <div className="divide-y divide-gray-100">
