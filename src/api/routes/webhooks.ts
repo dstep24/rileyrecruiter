@@ -14,6 +14,7 @@ import { RileyConversationRepository } from '../../domain/repositories/RileyConv
 import { OutreachTrackerRepository } from '../../domain/repositories/OutreachTrackerRepository.js';
 import { RileyAutoResponder } from '../../domain/services/RileyAutoResponder.js';
 import { PitchSequenceService } from '../../domain/services/PitchSequenceService.js';
+import { outreachSettingsService } from '../../domain/services/OutreachSettingsService.js';
 
 const router = Router();
 
@@ -260,13 +261,18 @@ async function handleNewRelation(payload: UnipileWebhookPayload): Promise<void> 
 
     console.log('[Webhook] Connection accepted! Candidate:', tracker.candidateName || providerId);
 
+    // Check if autopilot mode is enabled
+    const autopilotEnabled = outreachSettingsService.isAutopilotEnabled(tracker.tenantId);
+
+    console.log('[Webhook] Autopilot mode:', autopilotEnabled ? 'ENABLED' : 'DISABLED');
+
     // Handle the connection acceptance via PitchSequenceService
     // This will:
     // 1. Update tracker status to CONNECTION_ACCEPTED
     // 2. Create notification
-    // 3. Auto-send pitch if configured
+    // 3. Auto-send pitch ONLY if autopilot is enabled
     await pitchSequenceService.handleConnectionAccepted(tracker, {
-      autoPitch: true, // Can be made configurable via settings
+      autoPitch: autopilotEnabled,
     });
 
     console.log('[Webhook] Connection acceptance processed for:', tracker.candidateName);
