@@ -91,6 +91,9 @@ export function createApp() {
   // Outreach Tracking API
   app.use('/api/outreach', outreachRoutes);
 
+  // Outreach Settings API (autopilot mode, etc.)
+  app.use('/api/outreach-settings', outreachSettingsRoutes);
+
   // Notifications API
   app.use('/api/notifications', notificationsRoutes);
 
