@@ -9,9 +9,13 @@
  */
 
 import { Job } from 'bullmq';
+import { Redis } from 'ioredis';
 import { getQueueManager, QUEUE_NAMES, JobData, ScheduledJobData } from './TaskQueue.js';
 import { getPitchSequenceService } from '../../domain/services/PitchSequenceService.js';
 import { outreachTrackerRepo } from '../../domain/repositories/OutreachTrackerRepository.js';
+
+// Track if Redis is available
+let redisAvailable = false;
 
 // =============================================================================
 // JOB TYPES
@@ -178,8 +182,45 @@ async function setupFollowUpScheduler(): Promise<void> {
 let workersInitialized = false;
 
 /**
+ * Test Redis connection before attempting to create workers
+ */
+async function testRedisConnection(): Promise<boolean> {
+  const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
+
+  return new Promise((resolve) => {
+    const testClient = new Redis(redisUrl, {
+      maxRetriesPerRequest: 1,
+      retryStrategy: () => null, // Don't retry
+      connectTimeout: 3000,
+      lazyConnect: true,
+    });
+
+    const timeout = setTimeout(() => {
+      testClient.disconnect();
+      resolve(false);
+    }, 3000);
+
+    testClient.connect()
+      .then(() => {
+        clearTimeout(timeout);
+        testClient.disconnect();
+        resolve(true);
+      })
+      .catch(() => {
+        clearTimeout(timeout);
+        testClient.disconnect();
+        resolve(false);
+      });
+  });
+}
+
+/**
  * Initialize all queue workers.
  * Should be called once at application startup.
+ *
+ * NOTE: Gracefully handles Redis not being available - will warn and continue
+ * without the background job scheduler. Follow-ups can still be triggered
+ * manually via the API endpoint.
  */
 export async function initializeWorkers(): Promise<void> {
   if (workersInitialized) {
@@ -189,51 +230,87 @@ export async function initializeWorkers(): Promise<void> {
 
   console.log('[Workers] Initializing queue workers...');
 
-  const queueManager = getQueueManager();
+  // First, test if Redis is actually available
+  const redisConnected = await testRedisConnection();
 
-  // Register scheduled queue worker
-  queueManager.registerWorker(
-    QUEUE_NAMES.SCHEDULED,
-    processScheduledJob,
-    2 // Concurrency of 2 for scheduled jobs
-  );
+  if (!redisConnected) {
+    console.warn('[Workers] Redis is not available - skipping worker initialization');
+    console.warn('[Workers] Background job scheduling disabled. Use API endpoints for manual processing.');
+    console.warn('[Workers] To enable background jobs, start Redis: brew services start redis (or docker run -p 6379:6379 redis)');
+    redisAvailable = false;
+    return;
+  }
 
-  console.log('[Workers] Scheduled queue worker registered');
+  redisAvailable = true;
+  console.log('[Workers] Redis connection verified');
 
-  // Set up repeatable jobs
-  await setupFollowUpScheduler();
+  try {
+    const queueManager = getQueueManager();
 
-  workersInitialized = true;
-  console.log('[Workers] All workers initialized');
+    // Get the queue
+    const queue = queueManager.getQueue(QUEUE_NAMES.SCHEDULED);
+
+    // Register scheduled queue worker
+    queueManager.registerWorker(
+      QUEUE_NAMES.SCHEDULED,
+      processScheduledJob,
+      2 // Concurrency of 2 for scheduled jobs
+    );
+
+    console.log('[Workers] Scheduled queue worker registered');
+
+    // Set up repeatable jobs
+    await setupFollowUpScheduler();
+
+    workersInitialized = true;
+    console.log('[Workers] All workers initialized');
+  } catch (error) {
+    console.warn('[Workers] Failed to initialize workers');
+    console.warn('[Workers] Error:', error instanceof Error ? error.message : error);
+    // Don't throw - let the app continue without workers
+  }
 }
 
 /**
  * Schedule a delayed pitch for a specific tracker
+ * Returns true if scheduled, false if Redis not available
  */
 export async function scheduleDelayedPitch(
   trackerId: string,
   delayMinutes: number,
   tenantId: string
-): Promise<void> {
-  const queueManager = getQueueManager();
+): Promise<boolean> {
+  if (!redisAvailable) {
+    console.warn(`[Workers] Cannot schedule delayed pitch - Redis not available. Tracker: ${trackerId}`);
+    console.warn('[Workers] Pitch will need to be sent manually via API endpoint');
+    return false;
+  }
 
-  await queueManager.addJob(
-    QUEUE_NAMES.SCHEDULED,
-    {
-      type: 'scheduled',
-      subtype: 'send-delayed-pitch',
-      tenantId,
-      trackerId,
-      scheduledTaskId: `delayed-pitch-${trackerId}`,
-      originalJobType: 'send-delayed-pitch',
-      originalJobData: { trackerId },
-    } as DelayedPitchJobData,
-    {
-      delay: delayMinutes * 60 * 1000,
-    }
-  );
+  try {
+    const queueManager = getQueueManager();
 
-  console.log(`[Workers] Scheduled delayed pitch for tracker ${trackerId} in ${delayMinutes} minutes`);
+    await queueManager.addJob(
+      QUEUE_NAMES.SCHEDULED,
+      {
+        type: 'scheduled',
+        subtype: 'send-delayed-pitch',
+        tenantId,
+        trackerId,
+        scheduledTaskId: `delayed-pitch-${trackerId}`,
+        originalJobType: 'send-delayed-pitch',
+        originalJobData: { trackerId },
+      } as DelayedPitchJobData,
+      {
+        delay: delayMinutes * 60 * 1000,
+      }
+    );
+
+    console.log(`[Workers] Scheduled delayed pitch for tracker ${trackerId} in ${delayMinutes} minutes`);
+    return true;
+  } catch (error) {
+    console.warn(`[Workers] Failed to schedule delayed pitch for ${trackerId}:`, error);
+    return false;
+  }
 }
 
 /**
@@ -243,16 +320,38 @@ export async function getFollowUpSchedulerStats(): Promise<{
   isRunning: boolean;
   nextRun: Date | null;
   repeatableJobs: number;
+  redisAvailable: boolean;
 }> {
-  const queueManager = getQueueManager();
-  const queue = queueManager.getQueue(QUEUE_NAMES.SCHEDULED);
+  // Quick return if we already know Redis isn't available
+  if (!redisAvailable) {
+    return {
+      isRunning: false,
+      nextRun: null,
+      repeatableJobs: 0,
+      redisAvailable: false,
+    };
+  }
 
-  const repeatableJobs = await queue.getRepeatableJobs();
-  const followUpJob = repeatableJobs.find((j) => j.name === 'follow-up-processor');
+  try {
+    const queueManager = getQueueManager();
+    const queue = queueManager.getQueue(QUEUE_NAMES.SCHEDULED);
 
-  return {
-    isRunning: !!followUpJob,
-    nextRun: followUpJob?.next ? new Date(followUpJob.next) : null,
-    repeatableJobs: repeatableJobs.length,
-  };
+    const repeatableJobs = await queue.getRepeatableJobs();
+    const followUpJob = repeatableJobs.find((j) => j.name === 'follow-up-processor');
+
+    return {
+      isRunning: !!followUpJob,
+      nextRun: followUpJob?.next ? new Date(followUpJob.next) : null,
+      repeatableJobs: repeatableJobs.length,
+      redisAvailable: true,
+    };
+  } catch {
+    // Redis not available
+    return {
+      isRunning: false,
+      nextRun: null,
+      repeatableJobs: 0,
+      redisAvailable: false,
+    };
+  }
 }

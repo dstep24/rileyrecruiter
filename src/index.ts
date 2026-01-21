@@ -7,7 +7,7 @@
 import 'dotenv/config';
 import { createApp } from './api/app.js';
 import { connectDatabase, disconnectDatabase } from './infrastructure/database/prisma.js';
-import { getQueueManager, resetQueueManager } from './infrastructure/queue/TaskQueue.js';
+import { resetQueueManager } from './infrastructure/queue/TaskQueue.js';
 import { initializeWorkers } from './infrastructure/queue/workers.js';
 
 // =============================================================================
@@ -45,11 +45,8 @@ async function start() {
   console.log('Connecting to database...');
   await connectDatabase();
 
-  // Initialize queue manager (connects to Redis)
-  console.log('Initializing queue manager...');
-  getQueueManager();
-
   // Initialize background workers (follow-up scheduler, etc.)
+  // Note: This will gracefully degrade if Redis is not available
   console.log('Initializing background workers...');
   await initializeWorkers();
 

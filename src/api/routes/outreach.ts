@@ -293,6 +293,7 @@ router.get('/scheduler-status', async (_req: Request, res: Response) => {
         isRunning: stats.isRunning,
         nextRun: stats.nextRun,
         repeatableJobsCount: stats.repeatableJobs,
+        redisAvailable: stats.redisAvailable,
       },
     });
   } catch (error) {

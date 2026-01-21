@@ -127,6 +127,9 @@ const statusLabels: Record<string, string> = {
 // COMPONENT
 // =============================================================================
 
+// Outreach flow types for tab organization
+type OutreachFlow = 'connection' | 'direct';
+
 export default function QueuePage() {
   const [queue, setQueue] = useState<QueuedCandidate[]>([]);
   const [loading, setLoading] = useState(true);
@@ -145,6 +148,7 @@ export default function QueuePage() {
   const [assessmentTemplates, setAssessmentTemplates] = useState<AssessmentTemplate[]>([]);
   const [linkingAssessment, setLinkingAssessment] = useState<string | null>(null); // candidate id being linked
   const [sendingPitch, setSendingPitch] = useState<Set<string>>(new Set()); // tracking pitch sends
+  const [activeFlow, setActiveFlow] = useState<OutreachFlow>('connection'); // which tab is active
 
   // Load Unipile config, AI key status, and queue from localStorage on mount
   useEffect(() => {
@@ -232,7 +236,33 @@ export default function QueuePage() {
     setQueue(newQueue);
   };
 
-  // Filter queue items by status
+  // Helper to determine if an item is connection flow or direct flow
+  const isConnectionFlow = (item: QueuedCandidate) =>
+    item.messageType === 'connection_request' || item.messageType === 'connection_only';
+
+  const isDirectFlow = (item: QueuedCandidate) =>
+    item.messageType === 'inmail' || item.messageType === 'message';
+
+  // Filter queue items by flow type first
+  const connectionFlowItems = queue.filter(isConnectionFlow);
+  const directFlowItems = queue.filter(isDirectFlow);
+
+  // Then filter by status within each flow
+  // Connection Flow items
+  const connectionPending = connectionFlowItems.filter((item) => item.status === 'pending');
+  const connectionSent = connectionFlowItems.filter((item) => item.status === 'sent');
+  const connectionAccepted = connectionFlowItems.filter((item) => item.status === 'connection_accepted' || item.status === 'pitch_pending');
+  const connectionPitchSent = connectionFlowItems.filter((item) => item.status === 'pitch_sent');
+  const connectionReplied = connectionFlowItems.filter((item) => item.status === 'replied');
+  const connectionFailed = connectionFlowItems.filter((item) => item.status === 'failed');
+
+  // Direct Flow items
+  const directPending = directFlowItems.filter((item) => item.status === 'pending');
+  const directSent = directFlowItems.filter((item) => item.status === 'sent');
+  const directReplied = directFlowItems.filter((item) => item.status === 'replied');
+  const directFailed = directFlowItems.filter((item) => item.status === 'failed');
+
+  // Legacy combined filters for header stats
   const pendingItems = queue.filter((item) => item.status === 'pending');
   const sentItems = queue.filter((item) => item.status === 'sent');
   const acceptedItems = queue.filter((item) => item.status === 'connection_accepted' || item.status === 'pitch_pending');
@@ -251,10 +281,12 @@ export default function QueuePage() {
   };
 
   const selectAll = () => {
-    if (selectedItems.size === pendingItems.length) {
+    // Select all pending items in the active flow
+    const flowPending = activeFlow === 'connection' ? connectionPending : directPending;
+    if (selectedItems.size === flowPending.length) {
       setSelectedItems(new Set());
     } else {
-      setSelectedItems(new Set(pendingItems.map((item) => item.id)));
+      setSelectedItems(new Set(flowPending.map((item) => item.id)));
     }
   };
 
@@ -805,6 +837,85 @@ Best regards`;
         </div>
       </div>
 
+      {/* Flow Tabs */}
+      <div className="border-b border-gray-200">
+        <nav className="-mb-px flex space-x-8" aria-label="Outreach Flow">
+          <button
+            onClick={() => setActiveFlow('connection')}
+            className={`py-4 px-1 border-b-2 font-medium text-sm flex items-center gap-2 ${
+              activeFlow === 'connection'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+            }`}
+          >
+            <UserPlus className="h-4 w-4" />
+            Connection Flow
+            <span className={`ml-2 py-0.5 px-2 rounded-full text-xs ${
+              activeFlow === 'connection'
+                ? 'bg-blue-100 text-blue-600'
+                : 'bg-gray-100 text-gray-600'
+            }`}>
+              {connectionFlowItems.length}
+            </span>
+          </button>
+          <button
+            onClick={() => setActiveFlow('direct')}
+            className={`py-4 px-1 border-b-2 font-medium text-sm flex items-center gap-2 ${
+              activeFlow === 'direct'
+                ? 'border-purple-500 text-purple-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+            }`}
+          >
+            <Mail className="h-4 w-4" />
+            Direct Outreach
+            <span className={`ml-2 py-0.5 px-2 rounded-full text-xs ${
+              activeFlow === 'direct'
+                ? 'bg-purple-100 text-purple-600'
+                : 'bg-gray-100 text-gray-600'
+            }`}>
+              {directFlowItems.length}
+            </span>
+          </button>
+        </nav>
+      </div>
+
+      {/* Flow Description */}
+      {activeFlow === 'connection' ? (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+          <h3 className="font-medium text-blue-800 flex items-center gap-2">
+            <UserPlus className="h-4 w-4" />
+            Connection Flow (Basic / Sales Navigator)
+          </h3>
+          <p className="text-sm text-blue-700 mt-1">
+            Send connection request → Wait for acceptance → Send pitch message → Follow-up sequence
+          </p>
+          <div className="flex gap-2 mt-3 text-xs">
+            <span className="px-2 py-1 bg-yellow-100 text-yellow-800 rounded">Pending: {connectionPending.length}</span>
+            <span className="px-2 py-1 bg-green-100 text-green-800 rounded">Awaiting Accept: {connectionSent.length}</span>
+            <span className="px-2 py-1 bg-emerald-100 text-emerald-800 rounded">Connected: {connectionAccepted.length}</span>
+            <span className="px-2 py-1 bg-indigo-100 text-indigo-800 rounded">Pitched: {connectionPitchSent.length}</span>
+            <span className="px-2 py-1 bg-cyan-100 text-cyan-800 rounded">Replied: {connectionReplied.length}</span>
+            {connectionFailed.length > 0 && <span className="px-2 py-1 bg-red-100 text-red-800 rounded">Failed: {connectionFailed.length}</span>}
+          </div>
+        </div>
+      ) : (
+        <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
+          <h3 className="font-medium text-purple-800 flex items-center gap-2">
+            <Mail className="h-4 w-4" />
+            Direct Outreach (Recruiter / InMail)
+          </h3>
+          <p className="text-sm text-purple-700 mt-1">
+            Send initial pitch directly → No connection required → Follow-up sequence
+          </p>
+          <div className="flex gap-2 mt-3 text-xs">
+            <span className="px-2 py-1 bg-yellow-100 text-yellow-800 rounded">Pending: {directPending.length}</span>
+            <span className="px-2 py-1 bg-green-100 text-green-800 rounded">Sent: {directSent.length}</span>
+            <span className="px-2 py-1 bg-cyan-100 text-cyan-800 rounded">Replied: {directReplied.length}</span>
+            {directFailed.length > 0 && <span className="px-2 py-1 bg-red-100 text-red-800 rounded">Failed: {directFailed.length}</span>}
+          </div>
+        </div>
+      )}
+
       {/* Warning for candidates without LinkedIn IDs */}
       {candidatesWithoutProviderId > 0 && (
         <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 flex items-start gap-3">
@@ -860,7 +971,7 @@ Best regards`;
         </div>
       )}
 
-      {/* Empty State */}
+      {/* Empty State - Global */}
       {!loading && queue.length === 0 && (
         <div className="text-center py-12 bg-white rounded-lg border border-gray-200">
           <div className="text-gray-400 mb-4">
@@ -880,14 +991,58 @@ Best regards`;
         </div>
       )}
 
-      {/* Queue List */}
-      {pendingItems.length > 0 && (
+      {/* Empty State - Active Flow */}
+      {!loading && queue.length > 0 && (
+        (activeFlow === 'connection' && connectionFlowItems.length === 0) ||
+        (activeFlow === 'direct' && directFlowItems.length === 0)
+      ) && (
+        <div className="text-center py-12 bg-white rounded-lg border border-gray-200">
+          <div className="text-gray-400 mb-4">
+            {activeFlow === 'connection' ? (
+              <UserPlus className="h-12 w-12 mx-auto" />
+            ) : (
+              <Mail className="h-12 w-12 mx-auto" />
+            )}
+          </div>
+          <h3 className="text-lg font-medium text-gray-900 mb-2">
+            No {activeFlow === 'connection' ? 'connection requests' : 'direct messages'} in queue
+          </h3>
+          <p className="text-gray-500 mb-4">
+            {activeFlow === 'connection'
+              ? 'Add candidates with "Connect + Message" or "Connect (No Message)" message type.'
+              : 'Add candidates with "InMail" or "Direct Message" message type for Recruiter accounts.'}
+          </p>
+          <div className="flex justify-center gap-3">
+            <a
+              href="/sourcing"
+              className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+            >
+              <Linkedin className="h-4 w-4" />
+              Go to Sourcing
+            </a>
+            <button
+              onClick={() => setActiveFlow(activeFlow === 'connection' ? 'direct' : 'connection')}
+              className="inline-flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50"
+            >
+              View {activeFlow === 'connection' ? 'Direct Outreach' : 'Connection Flow'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Queue List - Flow Aware */}
+      {((activeFlow === 'connection' && connectionPending.length > 0) ||
+        (activeFlow === 'direct' && directPending.length > 0)) && (
         <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
           {/* Table Header */}
           <div className="flex items-center gap-4 px-4 py-3 bg-gray-50 border-b border-gray-200 text-sm font-medium text-gray-500">
             <input
               type="checkbox"
-              checked={selectedItems.size === pendingItems.length && pendingItems.length > 0}
+              checked={
+                activeFlow === 'connection'
+                  ? selectedItems.size === connectionPending.length && connectionPending.length > 0
+                  : selectedItems.size === directPending.length && directPending.length > 0
+              }
               onChange={selectAll}
               className="h-4 w-4 rounded border-gray-300"
             />
@@ -898,8 +1053,8 @@ Best regards`;
             <span className="w-48 text-center">Actions</span>
           </div>
 
-          {/* Pending Items */}
-          {pendingItems.map((item) => (
+          {/* Pending Items - Filtered by active flow */}
+          {(activeFlow === 'connection' ? connectionPending : directPending).map((item) => (
             <div key={item.id} className="border-b border-gray-200 last:border-b-0">
               <div className="flex items-center gap-4 px-4 py-4 hover:bg-gray-50">
                 <input
@@ -1325,13 +1480,13 @@ Best regards`;
         </div>
       )}
 
-      {/* Connection Accepted - Ready for Pitch */}
-      {acceptedItems.length > 0 && (
+      {/* Connection Accepted - Ready for Pitch (Connection Flow Only) */}
+      {activeFlow === 'connection' && connectionAccepted.length > 0 && (
         <div className="bg-white rounded-lg border border-emerald-200 overflow-hidden">
           <div className="px-4 py-3 bg-emerald-50 border-b border-emerald-200">
             <h3 className="font-medium text-emerald-800 flex items-center gap-2">
               <UserPlus className="h-4 w-4" />
-              Connection Accepted ({acceptedItems.length})
+              Connection Accepted ({connectionAccepted.length})
               <span className="ml-2 px-2 py-0.5 bg-emerald-200 text-emerald-800 rounded-full text-xs">
                 Ready to Pitch
               </span>
@@ -1341,7 +1496,7 @@ Best regards`;
             </p>
           </div>
           <div className="divide-y divide-gray-100">
-            {acceptedItems.map((item) => (
+            {connectionAccepted.map((item) => (
               <div key={item.id} className="flex items-center gap-4 px-4 py-3">
                 <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-600 text-sm font-medium overflow-hidden">
                   {item.profilePictureUrl ? (
@@ -1375,8 +1530,8 @@ Best regards`;
                     <ExternalLink className="h-4 w-4" />
                   </a>
                 )}
-                {/* Send Pitch Button */}
-                {item.status === 'pitch_pending' && item.trackerId && (
+                {/* Send Pitch Button - show for both connection_accepted and pitch_pending with trackerId */}
+                {(item.status === 'connection_accepted' || item.status === 'pitch_pending') && item.trackerId && (
                   <button
                     onClick={() => sendPitch(item)}
                     disabled={sendingPitch.has(item.id)}
@@ -1391,7 +1546,7 @@ Best regards`;
                     {sendingPitch.has(item.id) ? 'Sending...' : 'Send Pitch'}
                   </button>
                 )}
-                {item.status === 'connection_accepted' && !item.trackerId && (
+                {(item.status === 'connection_accepted' || item.status === 'pitch_pending') && !item.trackerId && (
                   <span className="px-3 py-1.5 bg-gray-100 text-gray-500 rounded-lg text-xs">
                     No tracker - autopilot may send
                   </span>
@@ -1402,20 +1557,20 @@ Best regards`;
         </div>
       )}
 
-      {/* Pitch Sent - Awaiting Response */}
-      {pitchSentItems.length > 0 && (
+      {/* Pitch Sent - Awaiting Response (Connection Flow Only) */}
+      {activeFlow === 'connection' && connectionPitchSent.length > 0 && (
         <div className="bg-white rounded-lg border border-indigo-200 overflow-hidden">
           <div className="px-4 py-3 bg-indigo-50 border-b border-indigo-200">
             <h3 className="font-medium text-indigo-800 flex items-center gap-2">
               <MessageSquare className="h-4 w-4" />
-              Pitch Sent ({pitchSentItems.length})
+              Pitch Sent ({connectionPitchSent.length})
               <span className="ml-2 px-2 py-0.5 bg-indigo-200 text-indigo-800 rounded-full text-xs">
                 Awaiting Response
               </span>
             </h3>
           </div>
           <div className="divide-y divide-gray-100">
-            {pitchSentItems.map((item) => (
+            {connectionPitchSent.map((item) => (
               <div key={item.id} className="flex items-center gap-4 px-4 py-3">
                 <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-600 text-sm font-medium">
                   {item.name.split(' ').map((n) => n[0]).join('')}
@@ -1433,20 +1588,21 @@ Best regards`;
         </div>
       )}
 
-      {/* Replied - Candidates who responded */}
-      {repliedItems.length > 0 && (
+      {/* Replied - Candidates who responded (Flow-aware) */}
+      {((activeFlow === 'connection' && connectionReplied.length > 0) ||
+        (activeFlow === 'direct' && directReplied.length > 0)) && (
         <div className="bg-white rounded-lg border border-cyan-200 overflow-hidden">
           <div className="px-4 py-3 bg-cyan-50 border-b border-cyan-200">
             <h3 className="font-medium text-cyan-800 flex items-center gap-2">
               <MessageSquare className="h-4 w-4" />
-              Replied ({repliedItems.length})
+              Replied ({activeFlow === 'connection' ? connectionReplied.length : directReplied.length})
               <span className="ml-2 px-2 py-0.5 bg-cyan-200 text-cyan-800 rounded-full text-xs">
                 In Conversation
               </span>
             </h3>
           </div>
           <div className="divide-y divide-gray-100">
-            {repliedItems.map((item) => (
+            {(activeFlow === 'connection' ? connectionReplied : directReplied).map((item) => (
               <div key={item.id} className="flex items-center gap-4 px-4 py-3">
                 <div className="w-8 h-8 rounded-full bg-cyan-100 flex items-center justify-center text-cyan-600 text-sm font-medium">
                   {item.name.split(' ').map((n) => n[0]).join('')}
@@ -1470,17 +1626,20 @@ Best regards`;
         </div>
       )}
 
-      {/* Sent Items */}
-      {sentItems.length > 0 && (
+      {/* Sent Items - Connection Flow (Awaiting Connection) */}
+      {activeFlow === 'connection' && connectionSent.length > 0 && (
         <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
           <div className="px-4 py-3 bg-green-50 border-b border-gray-200">
             <h3 className="font-medium text-green-800 flex items-center gap-2">
               <Check className="h-4 w-4" />
-              Awaiting Connection ({sentItems.length})
+              Awaiting Connection ({connectionSent.length})
             </h3>
+            <p className="text-xs text-green-600 mt-1">
+              Connection requests sent. Waiting for candidates to accept before pitching.
+            </p>
           </div>
           <div className="divide-y divide-gray-100">
-            {sentItems.map((item) => (
+            {connectionSent.map((item) => (
               <div key={item.id} className="flex items-center gap-4 px-4 py-3">
                 <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-gray-600 text-sm font-medium">
                   {item.name.split(' ').map((n) => n[0]).join('')}
@@ -1498,17 +1657,49 @@ Best regards`;
         </div>
       )}
 
-      {/* Failed Items */}
-      {failedItems.length > 0 && (
+      {/* Sent Items - Direct Flow (Awaiting Reply) */}
+      {activeFlow === 'direct' && directSent.length > 0 && (
+        <div className="bg-white rounded-lg border border-purple-200 overflow-hidden">
+          <div className="px-4 py-3 bg-purple-50 border-b border-purple-200">
+            <h3 className="font-medium text-purple-800 flex items-center gap-2">
+              <Mail className="h-4 w-4" />
+              Sent - Awaiting Reply ({directSent.length})
+            </h3>
+            <p className="text-xs text-purple-600 mt-1">
+              Initial pitch messages sent directly. Waiting for candidate response.
+            </p>
+          </div>
+          <div className="divide-y divide-gray-100">
+            {directSent.map((item) => (
+              <div key={item.id} className="flex items-center gap-4 px-4 py-3">
+                <div className="w-8 h-8 rounded-full bg-purple-100 flex items-center justify-center text-purple-600 text-sm font-medium">
+                  {item.name.split(' ').map((n) => n[0]).join('')}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-gray-900 truncate">{item.name}</p>
+                  <p className="text-xs text-gray-500">{messageTypeLabels[item.messageType].label}</p>
+                </div>
+                <span className={`px-2 py-0.5 text-xs font-medium rounded-full bg-purple-100 text-purple-800`}>
+                  Sent
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Failed Items (Flow-aware) */}
+      {((activeFlow === 'connection' && connectionFailed.length > 0) ||
+        (activeFlow === 'direct' && directFailed.length > 0)) && (
         <div className="bg-white rounded-lg border border-red-200 overflow-hidden">
           <div className="px-4 py-3 bg-red-50 border-b border-red-200">
             <h3 className="font-medium text-red-800 flex items-center gap-2">
               <AlertCircle className="h-4 w-4" />
-              Failed ({failedItems.length})
+              Failed ({activeFlow === 'connection' ? connectionFailed.length : directFailed.length})
             </h3>
           </div>
           <div className="divide-y divide-gray-100">
-            {failedItems.map((item) => (
+            {(activeFlow === 'connection' ? connectionFailed : directFailed).map((item) => (
               <div key={item.id} className="flex items-center gap-4 px-4 py-3">
                 <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-gray-600 text-sm font-medium">
                   {item.name.split(' ').map((n) => n[0]).join('')}
