@@ -352,6 +352,9 @@ model RileyConversation {
   updatedAt           DateTime                @updatedAt
   messages            RileyMessage[]
 
+  // Link to outreach that started this conversation
+  outreachTracker     OutreachTracker?
+
   @@index([chatId])
   @@index([candidateProviderId])
   @@index([status, stage])

@@ -913,6 +913,18 @@ Best regards`;
                           </>
                         ) : (
                           <>
+                            {/* Show indicator if message is AI-generated vs default */}
+                            {item.messageDraft ? (
+                              <div className="flex items-center gap-1 text-xs text-purple-600 mb-2">
+                                <Sparkles className="h-3 w-3" />
+                                AI-Generated Message
+                              </div>
+                            ) : (
+                              <div className="flex items-center gap-1 text-xs text-yellow-600 mb-2">
+                                <AlertCircle className="h-3 w-3" />
+                                Default Template - Click "Generate with AI" for personalized message
+                              </div>
+                            )}
                             <pre className="text-sm text-gray-700 whitespace-pre-wrap font-sans">
                               {item.messageDraft || generateDefaultMessage(item)}
                             </pre>
@@ -927,7 +939,7 @@ Best regards`;
                                 ) : (
                                   <Sparkles className="h-3 w-3" />
                                 )}
-                                {generatingAI.has(item.id) ? 'Generating...' : 'Generate with AI'}
+                                {generatingAI.has(item.id) ? 'Generating...' : item.messageDraft ? 'Regenerate with AI' : 'Generate with AI'}
                               </button>
                               <button
                                 onClick={() => startEditingDraft(item)}

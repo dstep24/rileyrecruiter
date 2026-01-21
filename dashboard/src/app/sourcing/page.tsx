@@ -464,6 +464,77 @@ export default function SourcingPage() {
         }
       }
 
+      // Generate AI outreach messages for each candidate
+      // Get Anthropic API key from localStorage
+      const anthropicApiKey = localStorage.getItem('riley_anthropic_api_key');
+      const roleInfo = {
+        title: parsedCriteria?.titles?.[0] || customJD.title || 'Software Engineer',
+        company: customJD.intakeNotes?.match(/company[:\s]+([^\n,]+)/i)?.[1]?.trim() || 'Our Client',
+        highlights: [
+          customJD.description?.slice(0, 100) || 'Great opportunity',
+          ...(parsedCriteria?.preferredSkills?.slice(0, 2) || []),
+        ].filter(Boolean),
+        location: customJD.location || undefined,
+      };
+
+      // Generate AI messages in parallel batches
+      const generateAIMessage = async (candidate: SourcedCandidate): Promise<string | undefined> => {
+        if (!anthropicApiKey) return undefined;
+
+        try {
+          const response = await fetch(`${API_BASE}/api/demo/ai/generate-outreach`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Anthropic-Api-Key': anthropicApiKey,
+            },
+            body: JSON.stringify({
+              candidate: {
+                id: candidate.id,
+                name: candidate.name,
+                headline: candidate.headline,
+                currentTitle: candidate.currentTitle,
+                currentCompany: candidate.currentCompany,
+                location: candidate.location,
+                skills: candidate.sourcingScore?.pillars?.roleFit?.note?.split(',').map(s => s.trim()) ||
+                        parsedCriteria?.requiredSkills || [],
+              },
+              role: roleInfo,
+              channel: 'linkedin_connection',
+            }),
+          });
+
+          if (response.ok) {
+            const data = await response.json();
+            if (data.success && data.outreach?.message) {
+              console.log(`[Sourcing] AI outreach generated for ${candidate.name}`);
+              return data.outreach.message;
+            }
+          }
+        } catch (err) {
+          console.warn(`[Sourcing] Failed to generate AI outreach for ${candidate.name}:`, err);
+        }
+        return undefined;
+      };
+
+      // Generate messages for all candidates in parallel (batches of 3)
+      const aiMessages = new Map<string, string>();
+      if (anthropicApiKey) {
+        console.log('[Sourcing] Generating AI outreach messages for', candidates.length, 'candidates...');
+        const batchSize = 3;
+        for (let i = 0; i < candidates.length; i += batchSize) {
+          const batch = candidates.slice(i, i + batchSize);
+          const results = await Promise.all(batch.map(async (c) => {
+            const message = await generateAIMessage(c);
+            return { id: c.id, message };
+          }));
+          results.forEach(({ id, message }) => {
+            if (message) aiMessages.set(id, message);
+          });
+        }
+        console.log('[Sourcing] Generated', aiMessages.size, 'AI outreach messages');
+      }
+
       // Create queue items for each candidate
       const newQueueItems: QueuedCandidate[] = candidates.map(candidate => ({
         id: `queue-${Date.now()}-${candidate.id}`,
@@ -479,6 +550,7 @@ export default function SourcingPage() {
         relevanceScore: candidate.relevanceScore,
         status: 'pending',
         messageType: 'connection_request', // Default to connection request
+        messageDraft: aiMessages.get(candidate.id), // Use AI-generated message if available
         createdAt: new Date().toISOString(),
         searchCriteria: parsedCriteria ? {
           jobTitle: parsedCriteria.titles[0] || customJD.title,
@@ -525,6 +597,15 @@ export default function SourcingPage() {
 
       // Build success message
       let successMessage = `Added ${uniqueNewItems.length} candidate(s) to messaging queue.`;
+
+      // Add AI outreach info
+      if (aiMessages.size > 0) {
+        successMessage += `\n\n✅ AI-generated personalized outreach messages created for ${aiMessages.size} candidate(s).`;
+      } else if (anthropicApiKey) {
+        successMessage += '\n\n⚠️ Could not generate AI outreach messages. Default templates will be used.';
+      } else {
+        successMessage += '\n\nℹ️ Add your Anthropic API key in Settings to enable AI-powered outreach messages.';
+      }
 
       // Add assessment info if generated
       if (assessmentInfo) {
