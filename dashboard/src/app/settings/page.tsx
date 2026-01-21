@@ -163,21 +163,6 @@ export default function SettingsPage() {
   } | null>(null);
 
   // Calendly Link Rotation state
-  interface CalendlyLink {
-    id: string;
-    recruiterName: string;
-    calendlyUrl: string;
-    isActive: boolean;
-    assignmentCount: number;
-    lastAssignedAt?: string;
-  }
-  interface CalendlyStats {
-    totalLinks: number;
-    activeLinks: number;
-    totalAssignments: number;
-    confirmedBookings: number;
-    bookingRate: number;
-  }
   const [calendlyLinks, setCalendlyLinks] = useState<CalendlyLink[]>([]);
   const [calendlyStats, setCalendlyStats] = useState<CalendlyStats | null>(null);
   const [loadingCalendly, setLoadingCalendly] = useState(false);

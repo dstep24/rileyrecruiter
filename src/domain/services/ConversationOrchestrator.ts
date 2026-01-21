@@ -382,8 +382,13 @@ export class ConversationOrchestrator {
   }
 }
 
-// Extended settings interface for orchestrator
-interface OutreachSettingsWithCalendly extends OutreachSettings {
+// Extended settings interface for orchestrator (same as OutreachSettings but with looser typing for escalateToHumanKeywords from JSON)
+interface OutreachSettingsWithCalendly {
+  autopilotMode: boolean;
+  pitchDelayMinutes: number;
+  followUpEnabled: boolean;
+  followUpDays: number[];
+  maxFollowUps: number;
   autoRespondEnabled: boolean;
   includeCalendlyInFinal: boolean;
   escalateToHumanKeywords: string[] | unknown;
