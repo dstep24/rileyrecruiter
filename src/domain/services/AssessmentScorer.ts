@@ -61,7 +61,7 @@ const ASSESSMENT_SCORING_PROMPT = `You are an expert technical recruiter evaluat
 ## Role Context
 {{#if roleTitle}}Title: {{roleTitle}}{{/if}}
 {{#if roleRequirements}}Requirements: {{roleRequirements}}{{/if}}
-{{#if salaryRange}}Salary Range: ${{salaryRange.min}} - ${{salaryRange.max}}{{/if}}
+{{#if salaryRange}}Salary Range: \${{salaryRange.min}} - \${{salaryRange.max}}{{/if}}
 {{#if locationRequirement}}Location: {{locationRequirement}}{{/if}}
 {{#if sponsorshipAvailable}}Visa Sponsorship: {{sponsorshipAvailable}}{{else}}Visa Sponsorship: Not available{{/if}}
 
@@ -234,11 +234,11 @@ export class AssessmentScorer {
 
     if (context?.salaryRange) {
       prompt = prompt.replace(
-        '{{#if salaryRange}}Salary Range: ${{salaryRange.min}} - ${{salaryRange.max}}{{/if}}',
+        '{{#if salaryRange}}Salary Range: \${{salaryRange.min}} - \${{salaryRange.max}}{{/if}}',
         `Salary Range: $${context.salaryRange.min.toLocaleString()} - $${context.salaryRange.max.toLocaleString()}`
       );
     } else {
-      prompt = prompt.replace('{{#if salaryRange}}Salary Range: ${{salaryRange.min}} - ${{salaryRange.max}}{{/if}}', '');
+      prompt = prompt.replace('{{#if salaryRange}}Salary Range: \${{salaryRange.min}} - \${{salaryRange.max}}{{/if}}', '');
     }
 
     if (context?.locationRequirement) {

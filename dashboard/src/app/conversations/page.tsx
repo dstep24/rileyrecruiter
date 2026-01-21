@@ -710,6 +710,23 @@ export default function ConversationsPage() {
                     </p>
                   </div>
                 )}
+
+                {/* Assessment Card */}
+                <div className="mt-3">
+                  {loadingAssessment ? (
+                    <div className="flex items-center gap-2 text-gray-500 text-sm">
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Loading assessment...
+                    </div>
+                  ) : (
+                    <AssessmentResultCard
+                      conversationId={selectedConversation.id}
+                      assessment={selectedAssessment as Parameters<typeof AssessmentResultCard>[0]['assessment']}
+                      templates={assessmentTemplates}
+                      onSendAssessment={sendAssessment}
+                    />
+                  )}
+                </div>
               </div>
 
               {/* Messages */}

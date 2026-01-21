@@ -96,7 +96,8 @@ router.get('/templates', async (req: Request, res: Response) => {
  */
 router.get('/templates/:id', async (req: Request, res: Response) => {
   try {
-    const template = await preScreeningService.getTemplate(req.params.id);
+    const templateId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const template = await preScreeningService.getTemplate(templateId);
 
     if (!template) {
       return res.status(404).json({ success: false, error: 'Template not found' });
@@ -122,7 +123,8 @@ router.put('/templates/:id', async (req: Request, res: Response) => {
       isActive?: boolean;
     };
 
-    const template = await preScreeningService.updateTemplate(req.params.id, {
+    const templateId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const template = await preScreeningService.updateTemplate(templateId, {
       name,
       description,
       roleType,
@@ -142,7 +144,8 @@ router.put('/templates/:id', async (req: Request, res: Response) => {
  */
 router.delete('/templates/:id', async (req: Request, res: Response) => {
   try {
-    await preScreeningService.deleteTemplate(req.params.id);
+    const templateId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    await preScreeningService.deleteTemplate(templateId);
     res.json({ success: true });
   } catch (error) {
     console.error('[Assessments] Delete template error:', error);
@@ -223,7 +226,8 @@ router.get('/responses', async (req: Request, res: Response) => {
  */
 router.get('/responses/:id', async (req: Request, res: Response) => {
   try {
-    const result = await preScreeningService.getAssessmentById(req.params.id);
+    const responseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const result = await preScreeningService.getAssessmentById(responseId);
 
     if (!result) {
       return res.status(404).json({ success: false, error: 'Response not found' });
@@ -242,7 +246,8 @@ router.get('/responses/:id', async (req: Request, res: Response) => {
  */
 router.get('/conversation/:conversationId', async (req: Request, res: Response) => {
   try {
-    const result = await preScreeningService.getAssessmentForConversation(req.params.conversationId);
+    const conversationId = Array.isArray(req.params.conversationId) ? req.params.conversationId[0] : req.params.conversationId;
+    const result = await preScreeningService.getAssessmentForConversation(conversationId);
 
     if (!result) {
       return res.json({ success: true, assessment: null });
@@ -266,8 +271,9 @@ router.get('/conversation/:conversationId', async (req: Request, res: Response) 
 router.post('/score/:responseId', async (req: Request, res: Response) => {
   try {
     const context = req.body as ScoringContext | undefined;
+    const responseId = Array.isArray(req.params.responseId) ? req.params.responseId[0] : req.params.responseId;
 
-    const result = await assessmentScorer.scoreAssessment(req.params.responseId, context);
+    const result = await assessmentScorer.scoreAssessment(responseId, context);
 
     res.json({ success: true, scoring: result });
   } catch (error) {
@@ -283,8 +289,9 @@ router.post('/score/:responseId', async (req: Request, res: Response) => {
 router.post('/score-conversation/:conversationId', async (req: Request, res: Response) => {
   try {
     const context = req.body as ScoringContext | undefined;
+    const conversationId = Array.isArray(req.params.conversationId) ? req.params.conversationId[0] : req.params.conversationId;
 
-    const result = await assessmentScorer.scoreByConversation(req.params.conversationId, context);
+    const result = await assessmentScorer.scoreByConversation(conversationId, context);
 
     if (!result) {
       return res.status(404).json({
@@ -310,7 +317,8 @@ router.post('/score-conversation/:conversationId', async (req: Request, res: Res
  */
 router.get('/public/:token', async (req: Request, res: Response) => {
   try {
-    const formData = await preScreeningService.getAssessmentForm(req.params.token);
+    const token = Array.isArray(req.params.token) ? req.params.token[0] : req.params.token;
+    const formData = await preScreeningService.getAssessmentForm(token);
 
     if (!formData) {
       return res.status(404).json({
@@ -349,8 +357,9 @@ router.post('/public/:token', async (req: Request, res: Response) => {
       });
     }
 
+    const token = Array.isArray(req.params.token) ? req.params.token[0] : req.params.token;
     const result = await preScreeningService.submitAnswers({
-      accessToken: req.params.token,
+      accessToken: token,
       answers,
       candidateName,
       candidateEmail,
