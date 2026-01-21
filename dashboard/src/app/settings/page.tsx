@@ -984,8 +984,104 @@ export default function SettingsPage() {
         );
 
       case 'autonomy':
+        // Load/save autopilot mode from localStorage
+        const getAutopilotMode = () => {
+          if (typeof window === 'undefined') return false;
+          return localStorage.getItem('riley_autopilot_mode') === 'true';
+        };
+
+        const toggleAutopilotMode = (enabled: boolean) => {
+          localStorage.setItem('riley_autopilot_mode', enabled ? 'true' : 'false');
+          setSettings({
+            ...settings,
+            autonomy: { ...settings.autonomy, autopilotMode: enabled },
+          });
+        };
+
+        const autopilotEnabled = settings.autonomy.autopilotMode ?? getAutopilotMode();
+
         return (
           <div className="space-y-6">
+            {/* Autopilot Mode - Featured Toggle */}
+            <div className={`p-4 rounded-lg border-2 ${
+              autopilotEnabled
+                ? 'bg-gradient-to-r from-purple-50 to-blue-50 border-purple-300'
+                : 'bg-gray-50 border-gray-200'
+            }`}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className={`p-2 rounded-lg ${autopilotEnabled ? 'bg-purple-100' : 'bg-gray-200'}`}>
+                    <Zap className={`h-6 w-6 ${autopilotEnabled ? 'text-purple-600' : 'text-gray-500'}`} />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-gray-900 flex items-center gap-2">
+                      Autopilot Mode
+                      {autopilotEnabled && (
+                        <span className="px-2 py-0.5 text-xs font-medium bg-purple-600 text-white rounded-full">
+                          ACTIVE
+                        </span>
+                      )}
+                    </p>
+                    <p className="text-sm text-gray-600">
+                      {autopilotEnabled
+                        ? 'Riley automatically sends pitches when connections are accepted'
+                        : 'All pitches require your manual approval before sending'}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => toggleAutopilotMode(!autopilotEnabled)}
+                  className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors ${
+                    autopilotEnabled ? 'bg-purple-600' : 'bg-gray-300'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-md transition ${
+                      autopilotEnabled ? 'translate-x-8' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              {/* Autopilot Details */}
+              <div className={`mt-4 pt-4 border-t ${autopilotEnabled ? 'border-purple-200' : 'border-gray-200'}`}>
+                <p className="text-xs font-medium text-gray-700 mb-2">When Autopilot is {autopilotEnabled ? 'ON' : 'OFF'}:</p>
+                <ul className="text-xs text-gray-600 space-y-1">
+                  {autopilotEnabled ? (
+                    <>
+                      <li className="flex items-center gap-2">
+                        <Check className="h-3 w-3 text-green-600" />
+                        Pitch messages sent automatically after connection acceptance
+                      </li>
+                      <li className="flex items-center gap-2">
+                        <Check className="h-3 w-3 text-green-600" />
+                        Follow-up sequences triggered automatically
+                      </li>
+                      <li className="flex items-center gap-2">
+                        <Check className="h-3 w-3 text-green-600" />
+                        AI handles routine responses in conversations
+                      </li>
+                    </>
+                  ) : (
+                    <>
+                      <li className="flex items-center gap-2">
+                        <AlertCircle className="h-3 w-3 text-yellow-600" />
+                        You&apos;ll be notified when connections are accepted
+                      </li>
+                      <li className="flex items-center gap-2">
+                        <AlertCircle className="h-3 w-3 text-yellow-600" />
+                        Review and approve each pitch before sending
+                      </li>
+                      <li className="flex items-center gap-2">
+                        <AlertCircle className="h-3 w-3 text-yellow-600" />
+                        Full control over every outgoing message
+                      </li>
+                    </>
+                  )}
+                </ul>
+              </div>
+            </div>
+
             <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
               <div className="flex items-start gap-3">
                 <AlertCircle className="h-5 w-5 text-yellow-600 mt-0.5" />
