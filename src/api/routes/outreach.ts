@@ -11,6 +11,7 @@ import {
   outreachTrackerRepo,
 } from '../../domain/repositories/OutreachTrackerRepository.js';
 import { PitchSequenceService, getPitchSequenceService } from '../../domain/services/PitchSequenceService.js';
+import { getFollowUpSchedulerStats } from '../../infrastructure/queue/workers.js';
 import type { OutreachType, OutreachStatus } from '../../generated/prisma/index.js';
 
 const router = Router();
@@ -275,6 +276,29 @@ router.post('/process-follow-ups', async (_req: Request, res: Response) => {
     console.error('[Outreach API] Error processing follow-ups:', error);
     return res.status(500).json({
       error: error instanceof Error ? error.message : 'Failed to process follow-ups',
+    });
+  }
+});
+
+/**
+ * GET /api/outreach/scheduler-status - Get follow-up scheduler status
+ */
+router.get('/scheduler-status', async (_req: Request, res: Response) => {
+  try {
+    const stats = await getFollowUpSchedulerStats();
+
+    return res.json({
+      success: true,
+      scheduler: {
+        isRunning: stats.isRunning,
+        nextRun: stats.nextRun,
+        repeatableJobsCount: stats.repeatableJobs,
+      },
+    });
+  } catch (error) {
+    console.error('[Outreach API] Error fetching scheduler status:', error);
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : 'Failed to fetch scheduler status',
     });
   }
 });

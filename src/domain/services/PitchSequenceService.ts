@@ -17,6 +17,7 @@ import { AIOutreachGenerator, createDefaultGuidelines, getAIOutreachGenerator } 
 import { OutreachTrackerRepository, outreachTrackerRepo } from '../repositories/OutreachTrackerRepository.js';
 import { RileyConversationRepository, rileyConversationRepo } from '../repositories/RileyConversationRepository.js';
 import { NotificationService, getNotificationService } from './NotificationService.js';
+import { scheduleDelayedPitch } from '../../infrastructure/queue/workers.js';
 import { prisma } from '../../infrastructure/database/prisma.js';
 import type { OutreachTracker } from '../../generated/prisma/index.js';
 import type { CandidateProfile } from './AICandidateScorer.js';
@@ -337,9 +338,10 @@ export class PitchSequenceService {
 
     if (shouldAutoPitch) {
       if (this.config.pitchDelayMinutes > 0) {
-        // Schedule delayed pitch (would need a job queue in production)
-        console.log(`[PitchSequenceService] Pitch delayed by ${this.config.pitchDelayMinutes} minutes`);
+        // Schedule delayed pitch via job queue
+        console.log(`[PitchSequenceService] Scheduling pitch in ${this.config.pitchDelayMinutes} minutes`);
         await this.outreachTrackerRepo.markPitchPending(tracker.id);
+        await scheduleDelayedPitch(tracker.id, this.config.pitchDelayMinutes, tracker.tenantId);
       } else {
         // Immediate pitch
         await this.sendPitch(tracker);

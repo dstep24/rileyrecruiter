@@ -8,6 +8,7 @@ import 'dotenv/config';
 import { createApp } from './api/app.js';
 import { connectDatabase, disconnectDatabase } from './infrastructure/database/prisma.js';
 import { getQueueManager, resetQueueManager } from './infrastructure/queue/TaskQueue.js';
+import { initializeWorkers } from './infrastructure/queue/workers.js';
 
 // =============================================================================
 // CONFIGURATION
@@ -47,6 +48,10 @@ async function start() {
   // Initialize queue manager (connects to Redis)
   console.log('Initializing queue manager...');
   getQueueManager();
+
+  // Initialize background workers (follow-up scheduler, etc.)
+  console.log('Initializing background workers...');
+  await initializeWorkers();
 
   // Create and start Express app
   const app = createApp();
