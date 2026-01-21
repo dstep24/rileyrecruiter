@@ -22,7 +22,15 @@ const router = Router();
 const rileyConversationRepo = new RileyConversationRepository();
 const outreachTrackerRepo = new OutreachTrackerRepository();
 const rileyAutoResponder = new RileyAutoResponder();
-const pitchSequenceService = new PitchSequenceService();
+
+// Lazy initialization for PitchSequenceService (depends on UnipileClient which may not be configured)
+let _pitchSequenceService: PitchSequenceService | null = null;
+function getPitchSequenceServiceLazy(): PitchSequenceService {
+  if (!_pitchSequenceService) {
+    _pitchSequenceService = new PitchSequenceService();
+  }
+  return _pitchSequenceService;
+}
 
 // =============================================================================
 // CONFIGURATION
@@ -271,7 +279,7 @@ async function handleNewRelation(payload: UnipileWebhookPayload): Promise<void> 
     // 1. Update tracker status to CONNECTION_ACCEPTED
     // 2. Create notification
     // 3. Auto-send pitch ONLY if autopilot is enabled
-    await pitchSequenceService.handleConnectionAccepted(tracker, {
+    await getPitchSequenceServiceLazy().handleConnectionAccepted(tracker, {
       autoPitch: autopilotEnabled,
     });
 
