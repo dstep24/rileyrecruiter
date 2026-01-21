@@ -428,6 +428,7 @@ router.get('/settings', async (req, res) => {
       level: 'SUPERVISED',
       approvalRequired: ['SEND_EMAIL', 'SEND_LINKEDIN_MESSAGE', 'SCHEDULE_INTERVIEW'],
       autoApprove: ['FOLLOW_UP_REMINDER'],
+      autopilotMode: false,
     },
     integrations: {
       ats: { connected: true, provider: 'greenhouse', lastSync: new Date().toISOString() },
