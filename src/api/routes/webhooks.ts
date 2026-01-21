@@ -11,13 +11,17 @@
 import { Router, Request, Response } from 'express';
 import { v4 as uuid } from 'uuid';
 import { RileyConversationRepository } from '../../domain/repositories/RileyConversationRepository.js';
+import { OutreachTrackerRepository } from '../../domain/repositories/OutreachTrackerRepository.js';
 import { RileyAutoResponder } from '../../domain/services/RileyAutoResponder.js';
+import { PitchSequenceService } from '../../domain/services/PitchSequenceService.js';
 
 const router = Router();
 
-// Initialize repository and auto-responder
+// Initialize repositories and services
 const rileyConversationRepo = new RileyConversationRepository();
+const outreachTrackerRepo = new OutreachTrackerRepository();
 const rileyAutoResponder = new RileyAutoResponder();
+const pitchSequenceService = new PitchSequenceService();
 
 // =============================================================================
 // CONFIGURATION
@@ -44,10 +48,12 @@ interface UnipileWebhookPayload {
     | 'message_read'
     | 'message_edited'
     | 'message_deleted'
-    | 'message_delivered';
+    | 'message_delivered'
+    | 'new_relation'
+    | 'relation_removed';
 
-  // Chat info
-  chat_id: string;
+  // Chat info (not present for new_relation events)
+  chat_id?: string;
 
   // Message details
   message?: string;
@@ -75,6 +81,13 @@ interface UnipileWebhookPayload {
     url?: string;
     name?: string;
   }>;
+
+  // new_relation event fields
+  user_provider_id?: string;      // New connection's LinkedIn URN (e.g., ACoXXX)
+  user_full_name?: string;        // Full name of the new connection
+  user_public_identifier?: string; // LinkedIn username/vanity URL
+  user_profile_url?: string;      // Full profile URL
+  user_picture_url?: string;      // Profile picture URL
 }
 
 interface ConversationEvent {
@@ -136,6 +149,27 @@ router.post('/unipile', async (req: Request, res: Response) => {
       });
     }
 
+    // Handle new_relation event separately (no chat_id)
+    if (payload.event === 'new_relation') {
+      await handleNewRelation(payload);
+      return res.status(200).json({
+        success: true,
+        eventType: 'new_relation',
+        processed: true,
+      });
+    }
+
+    // For message events, require chat_id
+    if (!payload.chat_id) {
+      console.log('[Webhook] No chat_id for event:', payload.event);
+      return res.status(200).json({
+        success: true,
+        eventType: payload.event,
+        processed: false,
+        reason: 'No chat_id provided',
+      });
+    }
+
     // Create conversation event record
     const event: ConversationEvent = {
       id: uuid(),
@@ -172,6 +206,10 @@ router.post('/unipile', async (req: Request, res: Response) => {
         console.log('[Webhook] Message read:', payload.chat_id);
         break;
 
+      case 'relation_removed':
+        console.log('[Webhook] Relation removed:', payload.user_provider_id);
+        break;
+
       default:
         console.log('[Webhook] Unhandled event type:', payload.event);
     }
@@ -189,6 +227,53 @@ router.post('/unipile', async (req: Request, res: Response) => {
     });
   }
 });
+
+/**
+ * Handle new_relation event - LinkedIn connection request was accepted
+ *
+ * This is triggered when someone accepts our connection request.
+ * We match it to a pending outreach tracker and optionally send the pitch.
+ */
+async function handleNewRelation(payload: UnipileWebhookPayload): Promise<void> {
+  const providerId = payload.user_provider_id;
+
+  console.log('[Webhook] new_relation event received:', {
+    providerId,
+    name: payload.user_full_name,
+    profileUrl: payload.user_profile_url,
+  });
+
+  if (!providerId) {
+    console.warn('[Webhook] new_relation event missing user_provider_id');
+    return;
+  }
+
+  try {
+    // Find matching outreach tracker (pending connection request for this candidate)
+    const tracker = await outreachTrackerRepo.findPendingByProviderId(providerId);
+
+    if (!tracker) {
+      console.log('[Webhook] new_relation for unknown candidate (not in outreach tracker):', providerId);
+      // This could be a connection that wasn't initiated through Riley
+      return;
+    }
+
+    console.log('[Webhook] Connection accepted! Candidate:', tracker.candidateName || providerId);
+
+    // Handle the connection acceptance via PitchSequenceService
+    // This will:
+    // 1. Update tracker status to CONNECTION_ACCEPTED
+    // 2. Create notification
+    // 3. Auto-send pitch if configured
+    await pitchSequenceService.handleConnectionAccepted(tracker, {
+      autoPitch: true, // Can be made configurable via settings
+    });
+
+    console.log('[Webhook] Connection acceptance processed for:', tracker.candidateName);
+  } catch (error) {
+    console.error('[Webhook] Error handling new_relation:', error);
+  }
+}
 
 /**
  * Handle incoming message - decide whether to auto-reply or escalate
