@@ -13,11 +13,18 @@ import {
 
 const router = Router();
 
-// Helper to get string from query param
+// Helper to get string from query param or route param
 function getQueryString(value: unknown): string | undefined {
   if (typeof value === 'string') return value;
   if (Array.isArray(value) && typeof value[0] === 'string') return value[0];
   return undefined;
+}
+
+// Helper to get required string param (route params)
+function getParamString(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value) && typeof value[0] === 'string') return value[0];
+  throw new Error('Required parameter is missing');
 }
 
 // =============================================================================
@@ -85,7 +92,7 @@ router.post('/links', async (req: Request, res: Response) => {
  */
 router.patch('/links/:id', async (req: Request, res: Response) => {
   try {
-    const linkId = req.params.id;
+    const linkId = getParamString(req.params.id);
     const { recruiterName, calendlyUrl, isActive } = req.body;
 
     const service = getCalendlyRotatorService();
@@ -114,7 +121,7 @@ router.patch('/links/:id', async (req: Request, res: Response) => {
  */
 router.delete('/links/:id', async (req: Request, res: Response) => {
   try {
-    const linkId = req.params.id;
+    const linkId = getParamString(req.params.id);
 
     const service = getCalendlyRotatorService();
     await service.deleteLink(linkId);
@@ -137,7 +144,7 @@ router.delete('/links/:id', async (req: Request, res: Response) => {
  */
 router.post('/links/:id/toggle', async (req: Request, res: Response) => {
   try {
-    const linkId = req.params.id;
+    const linkId = getParamString(req.params.id);
     const { isActive } = req.body;
 
     const service = getCalendlyRotatorService();
@@ -191,7 +198,7 @@ router.get('/assignments', async (req: Request, res: Response) => {
  */
 router.post('/assignments/:id/confirm', async (req: Request, res: Response) => {
   try {
-    const assignmentId = req.params.id;
+    const assignmentId = getParamString(req.params.id);
 
     const service = getCalendlyRotatorService();
     const assignment = await service.confirmBooking(assignmentId);
