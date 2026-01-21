@@ -15,6 +15,7 @@ import {
   RefreshCw,
   Wifi,
   WifiOff,
+  BarChart3,
 } from 'lucide-react';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
@@ -38,6 +39,11 @@ interface AnalyticsData {
     screened: number;
     interviewed: number;
   };
+  outreach?: {
+    total: number;
+    replied: number;
+    scheduled: number;
+  };
   metrics: {
     responseRate: number;
     approvalRate: number;
@@ -47,7 +53,31 @@ interface AnalyticsData {
   trends: {
     responsesThisWeek: number[];
     tasksThisWeek: number[];
+    outreachThisWeek?: number[];
   };
+  escalationBreakdown?: Array<{
+    reason: string;
+    count: number;
+  }>;
+  guidelinesEvolution?: Array<{
+    version: number;
+    status: string;
+    createdBy: string;
+    changelog: string | null;
+    createdAt: string;
+  }>;
+  criteriaEvolution?: Array<{
+    version: number;
+    status: string;
+    createdBy: string;
+    changelog: string | null;
+    createdAt: string;
+  }>;
+  topTemplates?: Array<{
+    name: string;
+    uses: number;
+    responseRate: number;
+  }>;
 }
 
 // =============================================================================
@@ -58,11 +88,11 @@ export default function AnalyticsPage() {
   const [timeRange, setTimeRange] = useState<'7d' | '30d' | '90d'>('30d');
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [demoMode, setDemoMode] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
-    setDemoMode(false);
+    setError(null);
     try {
       const response = await fetch(`${API_BASE}/api/analytics?period=${timeRange}`);
 
@@ -71,9 +101,11 @@ export default function AnalyticsPage() {
         setAnalytics(data.data || data);
       } else {
         console.error('Analytics API error:', response.status);
+        setError('Failed to load analytics data');
       }
     } catch (err) {
       console.error('Analytics fetch failed:', err);
+      setError('Unable to connect to analytics API');
     } finally {
       setLoading(false);
     }
@@ -83,105 +115,58 @@ export default function AnalyticsPage() {
     fetchData();
   }, [fetchData]);
 
-  // Generate activity data from trends
-  const weeklyActivity = analytics?.trends?.tasksThisWeek
-    ? ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((day, idx) => ({
-        day,
-        outreach: analytics.trends.tasksThisWeek[idx] || 0,
-        responses: analytics.trends.responsesThisWeek[idx] || 0,
-        scheduled: Math.floor((analytics.trends.responsesThisWeek[idx] || 0) * 0.3),
-      }))
-    : [
-        { day: 'Mon', outreach: 145, responses: 52, scheduled: 18 },
-        { day: 'Tue', outreach: 162, responses: 48, scheduled: 22 },
-        { day: 'Wed', outreach: 138, responses: 55, scheduled: 15 },
-        { day: 'Thu', outreach: 175, responses: 61, scheduled: 28 },
-        { day: 'Fri', outreach: 151, responses: 45, scheduled: 19 },
-        { day: 'Sat', outreach: 32, responses: 12, scheduled: 4 },
-        { day: 'Sun', outreach: 18, responses: 8, scheduled: 2 },
-      ];
+  // Generate activity data from trends - show real data only
+  const weeklyActivity = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((day, idx) => ({
+    day,
+    outreach: analytics?.trends?.outreachThisWeek?.[idx] || analytics?.trends?.tasksThisWeek?.[idx] || 0,
+    responses: analytics?.trends?.responsesThisWeek?.[idx] || 0,
+    scheduled: Math.floor((analytics?.trends?.responsesThisWeek?.[idx] || 0) * 0.3),
+  }));
 
-  const maxActivity = Math.max(...weeklyActivity.map((d) => d.outreach));
+  const maxActivity = Math.max(...weeklyActivity.map((d) => d.outreach), 1); // Min 1 to avoid division by zero
 
-  // Compute performance metrics from analytics
+  // Compute performance metrics from real analytics data
   const performanceMetrics = analytics
     ? {
         responseRate: {
           value: (analytics.metrics.responseRate * 100).toFixed(1),
-          change: 5.3,
           trend: 'up' as const,
         },
         timeToFirstResponse: {
           value: (analytics.metrics.avgTimeToResponse / 24).toFixed(1),
-          change: -0.8,
           trend: 'down' as const,
         },
         candidatesSourced: {
           value: analytics.candidates.sourced.toString(),
-          change: 12,
           trend: 'up' as const,
         },
         interviewsScheduled: {
           value: analytics.candidates.interviewed.toString(),
-          change: 8,
           trend: 'up' as const,
         },
         avgConfidenceScore: {
-          value: ((analytics.metrics.approvalRate * 100) - 5).toFixed(0),
-          change: 3,
+          value: (analytics.metrics.approvalRate * 100).toFixed(0),
           trend: 'up' as const,
         },
         escalationRate: {
           value: ((1 - analytics.metrics.approvalRate) * 100).toFixed(0),
-          change: -5,
           trend: 'down' as const,
         },
       }
-    : {
-        responseRate: { value: '34.2', change: 5.3, trend: 'up' as const },
-        timeToFirstResponse: { value: '2.4', change: -0.8, trend: 'down' as const },
-        candidatesSourced: { value: '847', change: 12, trend: 'up' as const },
-        interviewsScheduled: { value: '156', change: 8, trend: 'up' as const },
-        avgConfidenceScore: { value: '87', change: 3, trend: 'up' as const },
-        escalationRate: { value: '18', change: -5, trend: 'down' as const },
-      };
+    : null;
 
-  // Static data that doesn't come from the API yet
-  const topPerformingTemplates = [
-    { name: 'Technical Deep Dive Intro', responseRate: 0.42, uses: 234 },
-    { name: 'Startup Opportunity Hook', responseRate: 0.38, uses: 189 },
-    { name: 'Remote-First Pitch', responseRate: 0.35, uses: 312 },
-    { name: 'Career Growth Story', responseRate: 0.33, uses: 178 },
-  ];
+  // Use real templates data from API
+  const topPerformingTemplates = analytics?.topTemplates || [];
 
-  const guidelinesEvolution = [
-    { version: 12, date: '2024-01-15', changes: 3, type: 'template', impact: 'Response rate +2.1%' },
-    { version: 11, date: '2024-01-12', changes: 2, type: 'workflow', impact: 'Time to response -0.5 days' },
-    { version: 10, date: '2024-01-08', changes: 1, type: 'constraint', impact: 'Escalation rate -3%' },
-  ];
+  // Use real guidelines evolution from API
+  const guidelinesEvolution = analytics?.guidelinesEvolution || [];
 
-  const criteriaEvolution = [
-    { version: 8, date: '2024-01-14', changes: 2, type: 'rubric', impact: 'Hire quality +8%' },
-    { version: 7, date: '2024-01-10', changes: 1, type: 'threshold', impact: 'False positives -12%' },
-  ];
+  // Use real criteria evolution from API
+  const criteriaEvolution = analytics?.criteriaEvolution || [];
 
-  const escalationBreakdown = analytics
-    ? [
-        { reason: 'VIP Candidate', count: Math.floor(analytics.tasks.pending * 0.28), percentage: 0.28 },
-        { reason: 'Offer Discussion', count: Math.floor(analytics.tasks.pending * 0.22), percentage: 0.22 },
-        { reason: 'Low Confidence', count: Math.floor(analytics.tasks.pending * 0.18), percentage: 0.18 },
-        { reason: 'Edge Case', count: Math.floor(analytics.tasks.pending * 0.15), percentage: 0.15 },
-        { reason: 'Sensitive Comms', count: Math.floor(analytics.tasks.pending * 0.10), percentage: 0.10 },
-        { reason: 'Other', count: Math.floor(analytics.tasks.pending * 0.07), percentage: 0.07 },
-      ]
-    : [
-        { reason: 'VIP Candidate', count: 23, percentage: 0.28 },
-        { reason: 'Offer Discussion', count: 18, percentage: 0.22 },
-        { reason: 'Low Confidence', count: 15, percentage: 0.18 },
-        { reason: 'Edge Case', count: 12, percentage: 0.15 },
-        { reason: 'Sensitive Comms', count: 8, percentage: 0.10 },
-        { reason: 'Other', count: 6, percentage: 0.07 },
-      ];
+  // Use real escalation breakdown from API
+  const escalationBreakdown = analytics?.escalationBreakdown || [];
+  const totalEscalations = escalationBreakdown.reduce((sum, item) => sum + item.count, 0) || 1;
 
   if (loading) {
     return (
@@ -198,13 +183,12 @@ export default function AnalyticsPage() {
         description="Agent performance and G/C evolution insights"
         actions={
           <div className="flex items-center gap-3">
-            {demoMode && (
+            {error ? (
               <Badge variant="warning" className="flex items-center gap-1">
                 <WifiOff className="h-3 w-3" />
-                Demo Mode
+                Offline
               </Badge>
-            )}
-            {!demoMode && (
+            ) : (
               <Badge variant="success" className="flex items-center gap-1">
                 <Wifi className="h-3 w-3" />
                 Live
@@ -231,53 +215,70 @@ export default function AnalyticsPage() {
       />
 
       <div className="flex-1 overflow-auto p-6">
+        {/* Error State */}
+        {error && !analytics && (
+          <div className="mb-8 rounded-lg bg-yellow-50 border border-yellow-200 p-4">
+            <p className="text-yellow-800">{error}</p>
+            <p className="text-sm text-yellow-600 mt-1">
+              Make sure the backend server is running at {API_BASE}
+            </p>
+          </div>
+        )}
+
+        {/* No Data State */}
+        {!error && analytics && analytics.tasks.total === 0 && analytics.candidates.sourced === 0 && (
+          <div className="mb-8 rounded-lg bg-blue-50 border border-blue-200 p-6 text-center">
+            <BarChart3 className="h-12 w-12 mx-auto text-blue-400 mb-4" />
+            <h3 className="text-lg font-medium text-blue-900 mb-2">No activity yet</h3>
+            <p className="text-blue-700">
+              Start sourcing candidates and sending outreach to see your analytics here.
+            </p>
+          </div>
+        )}
+
         {/* Key Metrics */}
-        <div className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
-          <MetricCard
-            title="Response Rate"
-            value={`${performanceMetrics.responseRate.value}%`}
-            change={performanceMetrics.responseRate.change}
-            trend={performanceMetrics.responseRate.trend}
-            icon={<Mail className="h-5 w-5 text-blue-600" />}
-          />
-          <MetricCard
-            title="Time to Response"
-            value={`${performanceMetrics.timeToFirstResponse.value}d`}
-            change={performanceMetrics.timeToFirstResponse.change}
-            trend={performanceMetrics.timeToFirstResponse.trend}
-            trendInverted
-            icon={<Clock className="h-5 w-5 text-purple-600" />}
-          />
-          <MetricCard
-            title="Candidates Sourced"
-            value={performanceMetrics.candidatesSourced.value}
-            change={performanceMetrics.candidatesSourced.change}
-            trend={performanceMetrics.candidatesSourced.trend}
-            icon={<Users className="h-5 w-5 text-green-600" />}
-          />
-          <MetricCard
-            title="Interviews Scheduled"
-            value={performanceMetrics.interviewsScheduled.value}
-            change={performanceMetrics.interviewsScheduled.change}
-            trend={performanceMetrics.interviewsScheduled.trend}
-            icon={<Calendar className="h-5 w-5 text-yellow-600" />}
-          />
-          <MetricCard
-            title="Avg Confidence"
-            value={`${performanceMetrics.avgConfidenceScore.value}%`}
-            change={performanceMetrics.avgConfidenceScore.change}
-            trend={performanceMetrics.avgConfidenceScore.trend}
-            icon={<Target className="h-5 w-5 text-indigo-600" />}
-          />
-          <MetricCard
-            title="Escalation Rate"
-            value={`${performanceMetrics.escalationRate.value}%`}
-            change={performanceMetrics.escalationRate.change}
-            trend={performanceMetrics.escalationRate.trend}
-            trendInverted
-            icon={<CheckCircle className="h-5 w-5 text-teal-600" />}
-          />
-        </div>
+        {performanceMetrics && (
+          <div className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+            <MetricCard
+              title="Response Rate"
+              value={`${performanceMetrics.responseRate.value}%`}
+              trend={performanceMetrics.responseRate.trend}
+              icon={<Mail className="h-5 w-5 text-blue-600" />}
+            />
+            <MetricCard
+              title="Time to Response"
+              value={`${performanceMetrics.timeToFirstResponse.value}d`}
+              trend={performanceMetrics.timeToFirstResponse.trend}
+              trendInverted
+              icon={<Clock className="h-5 w-5 text-purple-600" />}
+            />
+            <MetricCard
+              title="Candidates Sourced"
+              value={performanceMetrics.candidatesSourced.value}
+              trend={performanceMetrics.candidatesSourced.trend}
+              icon={<Users className="h-5 w-5 text-green-600" />}
+            />
+            <MetricCard
+              title="Interviews Scheduled"
+              value={performanceMetrics.interviewsScheduled.value}
+              trend={performanceMetrics.interviewsScheduled.trend}
+              icon={<Calendar className="h-5 w-5 text-yellow-600" />}
+            />
+            <MetricCard
+              title="Approval Rate"
+              value={`${performanceMetrics.avgConfidenceScore.value}%`}
+              trend={performanceMetrics.avgConfidenceScore.trend}
+              icon={<Target className="h-5 w-5 text-indigo-600" />}
+            />
+            <MetricCard
+              title="Rejection Rate"
+              value={`${performanceMetrics.escalationRate.value}%`}
+              trend={performanceMetrics.escalationRate.trend}
+              trendInverted
+              icon={<CheckCircle className="h-5 w-5 text-teal-600" />}
+            />
+          </div>
+        )}
 
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           {/* Weekly Activity Chart */}
@@ -286,41 +287,47 @@ export default function AnalyticsPage() {
               <CardTitle>Weekly Activity</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="space-y-4">
-                {weeklyActivity.map((day) => (
-                  <div key={day.day} className="flex items-center space-x-4">
-                    <span className="w-8 text-sm font-medium text-gray-500">{day.day}</span>
-                    <div className="flex-1">
-                      <div className="flex space-x-1">
-                        <div
-                          className="h-6 rounded bg-blue-500"
-                          style={{ width: `${(day.outreach / maxActivity) * 100}%` }}
-                          title={`Outreach: ${day.outreach}`}
-                        />
+              {weeklyActivity.every(d => d.outreach === 0 && d.responses === 0) ? (
+                <div className="py-8 text-center text-gray-500">
+                  <p>No activity data for this period</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {weeklyActivity.map((day) => (
+                    <div key={day.day} className="flex items-center space-x-4">
+                      <span className="w-8 text-sm font-medium text-gray-500">{day.day}</span>
+                      <div className="flex-1">
+                        <div className="flex space-x-1">
+                          <div
+                            className="h-6 rounded bg-blue-500"
+                            style={{ width: `${(day.outreach / maxActivity) * 100}%`, minWidth: day.outreach > 0 ? '4px' : '0' }}
+                            title={`Outreach: ${day.outreach}`}
+                          />
+                        </div>
+                      </div>
+                      <div className="flex space-x-4 text-sm">
+                        <span className="text-blue-600">{day.outreach}</span>
+                        <span className="text-green-600">{day.responses}</span>
+                        <span className="text-purple-600">{day.scheduled}</span>
                       </div>
                     </div>
-                    <div className="flex space-x-4 text-sm">
-                      <span className="text-blue-600">{day.outreach}</span>
-                      <span className="text-green-600">{day.responses}</span>
-                      <span className="text-purple-600">{day.scheduled}</span>
-                    </div>
+                  ))}
+                  <div className="flex justify-end space-x-4 pt-2 text-xs">
+                    <span className="flex items-center">
+                      <span className="mr-1 h-2 w-2 rounded bg-blue-500" />
+                      Outreach
+                    </span>
+                    <span className="flex items-center">
+                      <span className="mr-1 h-2 w-2 rounded bg-green-500" />
+                      Responses
+                    </span>
+                    <span className="flex items-center">
+                      <span className="mr-1 h-2 w-2 rounded bg-purple-500" />
+                      Scheduled
+                    </span>
                   </div>
-                ))}
-                <div className="flex justify-end space-x-4 pt-2 text-xs">
-                  <span className="flex items-center">
-                    <span className="mr-1 h-2 w-2 rounded bg-blue-500" />
-                    Outreach
-                  </span>
-                  <span className="flex items-center">
-                    <span className="mr-1 h-2 w-2 rounded bg-green-500" />
-                    Responses
-                  </span>
-                  <span className="flex items-center">
-                    <span className="mr-1 h-2 w-2 rounded bg-purple-500" />
-                    Scheduled
-                  </span>
                 </div>
-              </div>
+              )}
             </CardContent>
           </Card>
 
@@ -330,22 +337,29 @@ export default function AnalyticsPage() {
               <CardTitle>Top Performing Templates</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="space-y-4">
-                {topPerformingTemplates.map((template, idx) => (
-                  <div key={template.name} className="flex items-center justify-between">
-                    <div className="flex items-center space-x-3">
-                      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-gray-100 text-sm font-medium">
-                        {idx + 1}
-                      </span>
-                      <span className="font-medium">{template.name}</span>
+              {topPerformingTemplates.length === 0 ? (
+                <div className="py-8 text-center text-gray-500">
+                  <p>No template performance data yet</p>
+                  <p className="text-sm mt-1">Create and use outreach templates to track performance</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {topPerformingTemplates.map((template, idx) => (
+                    <div key={template.name} className="flex items-center justify-between">
+                      <div className="flex items-center space-x-3">
+                        <span className="flex h-6 w-6 items-center justify-center rounded-full bg-gray-100 text-sm font-medium">
+                          {idx + 1}
+                        </span>
+                        <span className="font-medium">{template.name}</span>
+                      </div>
+                      <div className="flex items-center space-x-4">
+                        <span className="text-sm text-gray-500">{template.uses} uses</span>
+                        <Badge variant="success">{(template.responseRate * 100).toFixed(0)}%</Badge>
+                      </div>
                     </div>
-                    <div className="flex items-center space-x-4">
-                      <span className="text-sm text-gray-500">{template.uses} uses</span>
-                      <Badge variant="success">{(template.responseRate * 100).toFixed(0)}%</Badge>
-                    </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
 
@@ -358,30 +372,43 @@ export default function AnalyticsPage() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="space-y-4">
-                {guidelinesEvolution.map((version, idx) => (
-                  <div key={version.version} className="flex items-start space-x-3">
-                    <div className="flex flex-col items-center">
-                      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-100 text-sm font-semibold text-blue-600">
-                        v{version.version}
+              {guidelinesEvolution.length === 0 ? (
+                <div className="py-8 text-center text-gray-500">
+                  <p>No guidelines versions yet</p>
+                  <p className="text-sm mt-1">Guidelines track agent behavior patterns</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {guidelinesEvolution.map((version, idx) => (
+                    <div key={version.version} className="flex items-start space-x-3">
+                      <div className="flex flex-col items-center">
+                        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-100 text-sm font-semibold text-blue-600">
+                          v{version.version}
+                        </div>
+                        {idx < guidelinesEvolution.length - 1 && (
+                          <div className="h-8 w-0.5 bg-gray-200" />
+                        )}
                       </div>
-                      {idx < guidelinesEvolution.length - 1 && (
-                        <div className="h-8 w-0.5 bg-gray-200" />
-                      )}
-                    </div>
-                    <div className="flex-1 pb-4">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm font-medium">{version.date}</span>
-                        <Badge variant="default">{version.type}</Badge>
+                      <div className="flex-1 pb-4">
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm font-medium">
+                            {new Date(version.createdAt).toLocaleDateString()}
+                          </span>
+                          <Badge variant={version.status === 'ACTIVE' ? 'success' : 'default'}>
+                            {version.status.toLowerCase()}
+                          </Badge>
+                        </div>
+                        <p className="mt-1 text-sm text-gray-500">
+                          Created by {version.createdBy.toLowerCase()}
+                        </p>
+                        {version.changelog && (
+                          <p className="mt-1 text-sm text-gray-600">{version.changelog}</p>
+                        )}
                       </div>
-                      <p className="mt-1 text-sm text-gray-500">
-                        {version.changes} change{version.changes > 1 ? 's' : ''}
-                      </p>
-                      <p className="mt-1 text-sm font-medium text-green-600">{version.impact}</p>
                     </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
 
@@ -394,36 +421,49 @@ export default function AnalyticsPage() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="space-y-4">
-                {criteriaEvolution.map((version, idx) => (
-                  <div key={version.version} className="flex items-start space-x-3">
-                    <div className="flex flex-col items-center">
-                      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-purple-100 text-sm font-semibold text-purple-600">
-                        v{version.version}
-                      </div>
-                      {idx < criteriaEvolution.length - 1 && (
-                        <div className="h-8 w-0.5 bg-gray-200" />
-                      )}
-                    </div>
-                    <div className="flex-1 pb-4">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm font-medium">{version.date}</span>
-                        <Badge variant="default">{version.type}</Badge>
-                      </div>
-                      <p className="mt-1 text-sm text-gray-500">
-                        {version.changes} change{version.changes > 1 ? 's' : ''}
-                      </p>
-                      <p className="mt-1 text-sm font-medium text-green-600">{version.impact}</p>
-                    </div>
-                  </div>
-                ))}
-                <div className="mt-4 rounded-lg bg-purple-50 p-3">
-                  <p className="text-xs text-purple-700">
-                    <strong>Note:</strong> Only teleoperators can update Criteria (C) to prevent
-                    reward hacking. The agent can suggest updates based on outcomes.
-                  </p>
+              {criteriaEvolution.length === 0 ? (
+                <div className="py-8 text-center text-gray-500">
+                  <p>No criteria versions yet</p>
+                  <p className="text-sm mt-1">Criteria define quality standards</p>
                 </div>
-              </div>
+              ) : (
+                <div className="space-y-4">
+                  {criteriaEvolution.map((version, idx) => (
+                    <div key={version.version} className="flex items-start space-x-3">
+                      <div className="flex flex-col items-center">
+                        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-purple-100 text-sm font-semibold text-purple-600">
+                          v{version.version}
+                        </div>
+                        {idx < criteriaEvolution.length - 1 && (
+                          <div className="h-8 w-0.5 bg-gray-200" />
+                        )}
+                      </div>
+                      <div className="flex-1 pb-4">
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm font-medium">
+                            {new Date(version.createdAt).toLocaleDateString()}
+                          </span>
+                          <Badge variant={version.status === 'ACTIVE' ? 'success' : 'default'}>
+                            {version.status.toLowerCase()}
+                          </Badge>
+                        </div>
+                        <p className="mt-1 text-sm text-gray-500">
+                          Created by {version.createdBy.toLowerCase()}
+                        </p>
+                        {version.changelog && (
+                          <p className="mt-1 text-sm text-gray-600">{version.changelog}</p>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  <div className="mt-4 rounded-lg bg-purple-50 p-3">
+                    <p className="text-xs text-purple-700">
+                      <strong>Note:</strong> Only teleoperators can update Criteria (C) to prevent
+                      reward hacking. The agent can suggest updates based on outcomes.
+                    </p>
+                  </div>
+                </div>
+              )}
             </CardContent>
           </Card>
 
@@ -433,19 +473,28 @@ export default function AnalyticsPage() {
               <CardTitle>Escalation Breakdown</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="grid grid-cols-2 gap-6 sm:grid-cols-3 lg:grid-cols-6">
-                {escalationBreakdown.map((item) => (
-                  <div key={item.reason} className="text-center">
-                    <div className="mx-auto mb-2 flex h-16 w-16 items-center justify-center rounded-full bg-gray-100">
-                      <span className="text-xl font-bold text-gray-700">{item.count}</span>
+              {escalationBreakdown.length === 0 ? (
+                <div className="py-8 text-center text-gray-500">
+                  <p>No escalations recorded</p>
+                  <p className="text-sm mt-1">Escalations appear when tasks need human review</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-6 sm:grid-cols-3 lg:grid-cols-6">
+                  {escalationBreakdown.map((item) => (
+                    <div key={item.reason} className="text-center">
+                      <div className="mx-auto mb-2 flex h-16 w-16 items-center justify-center rounded-full bg-gray-100">
+                        <span className="text-xl font-bold text-gray-700">{item.count}</span>
+                      </div>
+                      <p className="text-sm font-medium text-gray-900">
+                        {formatEscalationReason(item.reason)}
+                      </p>
+                      <p className="text-xs text-gray-500">
+                        {((item.count / totalEscalations) * 100).toFixed(0)}% of total
+                      </p>
                     </div>
-                    <p className="text-sm font-medium text-gray-900">{item.reason}</p>
-                    <p className="text-xs text-gray-500">
-                      {(item.percentage * 100).toFixed(0)}% of total
-                    </p>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
         </div>
@@ -454,18 +503,32 @@ export default function AnalyticsPage() {
   );
 }
 
+// Format escalation reason for display
+function formatEscalationReason(reason: string): string {
+  const labels: Record<string, string> = {
+    SENSITIVE_COMMUNICATION: 'Sensitive Comms',
+    BUDGET_DISCUSSION: 'Budget Talk',
+    OFFER_NEGOTIATION: 'Offer Discussion',
+    CANDIDATE_COMPLAINT: 'Complaint',
+    EDGE_CASE: 'Edge Case',
+    LOW_CONFIDENCE: 'Low Confidence',
+    POLICY_VIOLATION_RISK: 'Policy Risk',
+    FIRST_CONTACT_VIP: 'VIP Candidate',
+    MANUAL_REVIEW_REQUESTED: 'Manual Review',
+  };
+  return labels[reason] || reason.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, l => l.toUpperCase());
+}
+
 // Metric Card Component
 function MetricCard({
   title,
   value,
-  change,
   trend,
   icon,
   trendInverted = false,
 }: {
   title: string;
   value: string;
-  change: number;
   trend: 'up' | 'down';
   icon: React.ReactNode;
   trendInverted?: boolean;
@@ -478,14 +541,7 @@ function MetricCard({
       <CardContent className="p-4">
         <div className="flex items-center justify-between">
           <div className="rounded-lg bg-gray-100 p-2">{icon}</div>
-          <div
-            className={`flex items-center text-xs font-medium ${
-              isPositive ? 'text-green-600' : 'text-red-600'
-            }`}
-          >
-            <TrendIcon className="mr-1 h-3 w-3" />
-            {Math.abs(change).toFixed(1)}
-          </div>
+          <TrendIcon className={`h-4 w-4 ${isPositive ? 'text-green-600' : 'text-red-600'}`} />
         </div>
         <div className="mt-3">
           <p className="text-2xl font-bold text-gray-900">{value}</p>

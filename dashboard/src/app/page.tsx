@@ -15,6 +15,8 @@ import {
   Search,
   Mail,
   UserCheck,
+  FileText,
+  MessageSquare,
 } from 'lucide-react';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
@@ -38,35 +40,66 @@ interface Task {
   createdAt: string;
 }
 
+interface Activity {
+  id: string;
+  type: string;
+  action: string;
+  target: string;
+  time: string;
+}
+
+interface GuidelinesVersion {
+  version: number;
+  status: string;
+  changelog: string | null;
+  createdAt: string;
+}
+
 export default function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [recentTasks, setRecentTasks] = useState<Task[]>([]);
+  const [activities, setActivities] = useState<Activity[]>([]);
+  const [guidelinesUpdates, setGuidelinesUpdates] = useState<GuidelinesVersion[]>([]);
   const [loading, setLoading] = useState(true);
   const [demoMode, setDemoMode] = useState(false);
-  const [triggeringAction, setTriggeringAction] = useState<string | null>(null);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const [analyticsRes, tasksRes] = await Promise.all([
+      const [analyticsRes, tasksRes, activityRes] = await Promise.all([
         fetch(`${API_BASE}/api/analytics`),
         fetch(`${API_BASE}/api/tasks/pending`),
+        fetch(`${API_BASE}/api/analytics/activity?limit=5`),
       ]);
 
       if (analyticsRes.ok) {
         const analyticsData = await analyticsRes.json();
         setStats({
-          pendingApproval: analyticsData.tasks?.pending || 0,
-          avgWaitTime: analyticsData.metrics?.avgApprovalTime || 0,
-          escalations: Math.floor((analyticsData.tasks?.pending || 0) * 0.3),
-          approvalRate: Math.round((analyticsData.metrics?.approvalRate || 0) * 100),
+          pendingApproval: analyticsData.data?.tasks?.pending || 0,
+          avgWaitTime: Math.round(analyticsData.data?.metrics?.avgApprovalTime || 0),
+          escalations: analyticsData.data?.escalationBreakdown?.length || 0,
+          approvalRate: Math.round((analyticsData.data?.metrics?.approvalRate || 0) * 100),
         });
+
+        // Set guidelines updates from real data
+        setGuidelinesUpdates(analyticsData.data?.guidelinesEvolution || []);
       }
 
       if (tasksRes.ok) {
         const tasksData = await tasksRes.json();
         setRecentTasks((tasksData.data || tasksData || []).slice(0, 5));
       }
+
+      if (activityRes.ok) {
+        const activityData = await activityRes.json();
+        if (activityData.activities) {
+          setActivities(activityData.activities.map((a: Activity) => ({
+            ...a,
+            time: formatTimeAgo(new Date(a.time)),
+          })));
+        }
+      }
+
       setDemoMode(false);
     } catch (err) {
       console.error('Dashboard fetch failed:', err);
@@ -75,35 +108,30 @@ export default function DashboardPage() {
     }
   }, []);
 
+  const formatTimeAgo = (date: Date) => {
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+
+    if (diffMins < 1) return 'Just now';
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffMins < 1440) return `${Math.floor(diffMins / 60)}h ago`;
+    return `${Math.floor(diffMins / 1440)}d ago`;
+  };
+
   useEffect(() => {
     fetchData();
   }, [fetchData]);
 
   const triggerAction = async (action: string) => {
-    setTriggeringAction(action);
-    try {
-      const endpoint = `${API_BASE}/api/actions/${action}`;
-      const body = action === 'sourcing'
-        ? { requisitionId: 'demo-req-1' }
-        : action === 'outreach'
-        ? { candidateIds: ['demo-1', 'demo-2', 'demo-3'] }
-        : {};
-
-      await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Tenant-Id': 'demo-tenant',
-        },
-        body: JSON.stringify(body),
-      });
-
-      // Refresh data after trigger
-      setTimeout(fetchData, 1000);
-    } catch (err) {
-      console.error('Failed to trigger action:', err);
-    } finally {
-      setTriggeringAction(null);
+    // Quick actions now navigate to the appropriate pages
+    // since we can't trigger actions without real data
+    if (action === 'sourcing') {
+      window.location.href = '/sourcing';
+    } else if (action === 'outreach') {
+      window.location.href = '/queue?tab=direct-outreach';
+    } else if (action === 'screen') {
+      window.location.href = '/queue?tab=connection-flow';
     }
   };
 
@@ -224,41 +252,26 @@ export default function DashboardPage() {
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <button
                   onClick={() => triggerAction('sourcing')}
-                  disabled={triggeringAction !== null}
-                  className="flex items-center justify-center gap-2 p-4 border-2 border-dashed border-gray-200 rounded-lg hover:border-blue-300 hover:bg-blue-50 transition-colors disabled:opacity-50"
+                  className="flex items-center justify-center gap-2 p-4 border-2 border-dashed border-gray-200 rounded-lg hover:border-blue-300 hover:bg-blue-50 transition-colors"
                 >
-                  {triggeringAction === 'sourcing' ? (
-                    <RefreshCw className="h-5 w-5 animate-spin text-blue-600" />
-                  ) : (
-                    <Search className="h-5 w-5 text-blue-600" />
-                  )}
+                  <Search className="h-5 w-5 text-blue-600" />
                   <span className="font-medium text-gray-700">Start Sourcing</span>
                 </button>
 
                 <button
                   onClick={() => triggerAction('outreach')}
-                  disabled={triggeringAction !== null}
-                  className="flex items-center justify-center gap-2 p-4 border-2 border-dashed border-gray-200 rounded-lg hover:border-green-300 hover:bg-green-50 transition-colors disabled:opacity-50"
+                  className="flex items-center justify-center gap-2 p-4 border-2 border-dashed border-gray-200 rounded-lg hover:border-green-300 hover:bg-green-50 transition-colors"
                 >
-                  {triggeringAction === 'outreach' ? (
-                    <RefreshCw className="h-5 w-5 animate-spin text-green-600" />
-                  ) : (
-                    <Mail className="h-5 w-5 text-green-600" />
-                  )}
+                  <Mail className="h-5 w-5 text-green-600" />
                   <span className="font-medium text-gray-700">Send Outreach</span>
                 </button>
 
                 <button
                   onClick={() => triggerAction('screen')}
-                  disabled={triggeringAction !== null}
-                  className="flex items-center justify-center gap-2 p-4 border-2 border-dashed border-gray-200 rounded-lg hover:border-purple-300 hover:bg-purple-50 transition-colors disabled:opacity-50"
+                  className="flex items-center justify-center gap-2 p-4 border-2 border-dashed border-gray-200 rounded-lg hover:border-purple-300 hover:bg-purple-50 transition-colors"
                 >
-                  {triggeringAction === 'screen' ? (
-                    <RefreshCw className="h-5 w-5 animate-spin text-purple-600" />
-                  ) : (
-                    <UserCheck className="h-5 w-5 text-purple-600" />
-                  )}
-                  <span className="font-medium text-gray-700">Screen Candidates</span>
+                  <UserCheck className="h-5 w-5 text-purple-600" />
+                  <span className="font-medium text-gray-700">Review Queue</span>
                 </button>
               </div>
             </CardContent>
@@ -330,58 +343,77 @@ export default function DashboardPage() {
         <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-2">
           <Card>
             <CardHeader>
-              <CardTitle>Riley Activity</CardTitle>
+              <CardTitle className="flex items-center gap-2">
+                <MessageSquare className="h-5 w-5" />
+                Riley Activity
+              </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="space-y-4">
-                {[
-                  { action: 'Generated outreach email', target: 'Sarah Johnson', time: '2m ago' },
-                  { action: 'Screened resume', target: 'John Smith', time: '5m ago' },
-                  { action: 'Scheduled interview', target: 'Emily Davis', time: '8m ago' },
-                  { action: 'Updated candidate status', target: 'Michael Chen', time: '12m ago' },
-                ].map((activity, i) => (
-                  <div key={i} className="flex items-center space-x-3">
-                    <div className="h-2 w-2 rounded-full bg-green-500" />
-                    <div className="flex-1">
-                      <p className="text-sm text-gray-900">
-                        {activity.action} for <span className="font-medium">{activity.target}</span>
-                      </p>
+              {activities.length > 0 ? (
+                <div className="space-y-4">
+                  {activities.map((activity) => (
+                    <div key={activity.id} className="flex items-center space-x-3">
+                      <div className={`h-2 w-2 rounded-full ${
+                        activity.type === 'task' ? 'bg-blue-500' :
+                        activity.type === 'outreach' ? 'bg-green-500' :
+                        'bg-purple-500'
+                      }`} />
+                      <div className="flex-1">
+                        <p className="text-sm text-gray-900">
+                          {activity.action} <span className="font-medium">{activity.target}</span>
+                        </p>
+                      </div>
+                      <p className="text-xs text-gray-500">{activity.time}</p>
                     </div>
-                    <p className="text-xs text-gray-500">{activity.time}</p>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center py-8 text-gray-500">
+                  <MessageSquare className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                  <p>No recent activity</p>
+                  <p className="text-xs mt-1">Activity will appear here as Riley works</p>
+                </div>
+              )}
             </CardContent>
           </Card>
 
           <Card>
             <CardHeader>
-              <CardTitle>Guidelines Updates</CardTitle>
+              <CardTitle className="flex items-center gap-2">
+                <FileText className="h-5 w-5" />
+                Guidelines Updates
+              </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="space-y-4">
-                {[
-                  { status: 'pending', desc: 'New outreach template proposed', version: 'v12 draft' },
-                  { status: 'approved', desc: 'Updated screening criteria', version: 'v11' },
-                  { status: 'rejected', desc: 'Follow-up timing change', version: 'v10 draft' },
-                ].map((update, i) => (
-                  <div key={i} className="flex items-center space-x-3">
-                    <div
-                      className={`h-2 w-2 rounded-full ${
-                        update.status === 'approved'
-                          ? 'bg-green-500'
-                          : update.status === 'rejected'
-                          ? 'bg-red-500'
-                          : 'bg-yellow-500'
-                      }`}
-                    />
-                    <div className="flex-1">
-                      <p className="text-sm text-gray-900">{update.desc}</p>
-                      <p className="text-xs text-gray-500">{update.version}</p>
+              {guidelinesUpdates.length > 0 ? (
+                <div className="space-y-4">
+                  {guidelinesUpdates.map((update) => (
+                    <div key={update.version} className="flex items-center space-x-3">
+                      <div
+                        className={`h-2 w-2 rounded-full ${
+                          update.status === 'ACTIVE'
+                            ? 'bg-green-500'
+                            : update.status === 'DRAFT'
+                            ? 'bg-yellow-500'
+                            : 'bg-gray-400'
+                        }`}
+                      />
+                      <div className="flex-1">
+                        <p className="text-sm text-gray-900">
+                          {update.changelog || `Guidelines version ${update.version}`}
+                        </p>
+                        <p className="text-xs text-gray-500">v{update.version} • {update.status.toLowerCase()}</p>
+                      </div>
                     </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center py-8 text-gray-500">
+                  <FileText className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                  <p>No guidelines yet</p>
+                  <p className="text-xs mt-1">Guidelines will evolve based on your feedback</p>
+                </div>
+              )}
             </CardContent>
           </Card>
         </div>

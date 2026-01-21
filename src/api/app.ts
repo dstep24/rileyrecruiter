@@ -10,7 +10,8 @@ import { tenantMiddleware } from './middleware/tenantMiddleware.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
 import { healthRoutes, taskRoutes, sourcingRoutes } from './routes/index.js';
 import actionsRoutes from './routes/actions.js';
-import coreApiRoutes from './routes/demo.js'; // Main API routes (analytics, settings, chat, AI, etc.)
+import analyticsRoutes from './routes/analytics.js'; // Real analytics from database
+import coreApiRoutes from './routes/demo.js'; // Demo/sandbox routes for testing
 import webhooksRoutes from './routes/webhooks.js'; // Webhook handlers for external services
 import assessmentsRoutes from './routes/assessments.js'; // Pre-screening assessment routes
 import outreachTemplatesRoutes from './routes/outreach-templates.js'; // Outreach template management
@@ -101,12 +102,15 @@ export function createApp() {
   // Calendly Link Rotation API
   app.use('/api/calendly', calendlyRoutes);
 
+  // Analytics API (real metrics from database)
+  app.use('/api/analytics', analyticsRoutes);
+
   // ===========================================================================
-  // CORE API ROUTES (analytics, settings, AI, chat, etc.)
-  // These use the tenant middleware already applied above
+  // DEMO/SANDBOX ROUTES (for testing without real data)
+  // These provide fallback data when real data isn't available
   // ===========================================================================
 
-  app.use('/api', coreApiRoutes);
+  app.use('/api/demo', coreApiRoutes);
 
   // ===========================================================================
   // ERROR HANDLING
