@@ -14,6 +14,8 @@ import coreApiRoutes from './routes/demo.js'; // Main API routes (analytics, set
 import webhooksRoutes from './routes/webhooks.js'; // Webhook handlers for external services
 import assessmentsRoutes from './routes/assessments.js'; // Pre-screening assessment routes
 import outreachTemplatesRoutes from './routes/outreach-templates.js'; // Outreach template management
+import outreachRoutes from './routes/outreach.js'; // Outreach tracking routes
+import notificationsRoutes from './routes/notifications.js'; // Notification routes
 
 // =============================================================================
 // CREATE APP
@@ -84,6 +86,12 @@ export function createApp() {
 
   // Outreach Templates API
   app.use('/api/outreach-templates', outreachTemplatesRoutes);
+
+  // Outreach Tracking API
+  app.use('/api/outreach', outreachRoutes);
+
+  // Notifications API
+  app.use('/api/notifications', notificationsRoutes);
 
   // ===========================================================================
   // CORE API ROUTES (analytics, settings, AI, chat, etc.)
