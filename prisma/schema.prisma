@@ -372,6 +372,58 @@ model RileyMessage {
 }
 
 // =============================================================================
+// OUTREACH TEMPLATES
+// =============================================================================
+
+model OutreachTemplate {
+  id          String   @id @default(uuid())
+  tenantId    String
+
+  name        String                    // "High-Converting Engineer Outreach"
+  description String?                   // When to use this template
+  category    OutreachCategory          // INITIAL, FOLLOW_UP, REFERRAL, etc.
+  channel     OutreachChannel           // LINKEDIN_CONNECTION, LINKEDIN_INMAIL, EMAIL
+  roleType    String?                   // "engineering", "sales", etc.
+
+  // Template content
+  subjectTemplate String?               // For InMail/email: "{{roleTitle}} | {{arr}} | {{investors}}"
+  messageTemplate String                // The message with placeholders
+
+  // Metadata
+  brandVoice  String   @default("professional-warm")
+  isActive    Boolean  @default(true)
+  isDefault   Boolean  @default(false)  // Default template for this category/channel
+
+  // Usage tracking
+  useCount    Int      @default(0)
+  responseRate Float?                   // Tracked response rate for this template
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([tenantId, category, channel])
+  @@index([tenantId, isActive])
+  @@map("outreach_templates")
+}
+
+enum OutreachCategory {
+  INITIAL_OUTREACH          // First contact
+  FOLLOW_UP_1               // First follow-up (3-5 days)
+  FOLLOW_UP_2               // Second follow-up (7 days)
+  FOLLOW_UP_3               // Third/final follow-up
+  REFERRAL_ASK              // Asking for referrals
+  RE_ENGAGEMENT             // Re-engaging cold candidates
+  WARM_INTRO                // When you have a mutual connection
+  POST_INTERVIEW            // After interview feedback
+}
+
+enum OutreachChannel {
+  LINKEDIN_CONNECTION       // 300 char limit
+  LINKEDIN_INMAIL           // 1900 char limit
+  EMAIL                     // No practical limit
+}
+
+// =============================================================================
 // PRE-SCREENING ASSESSMENT MODELS
 // =============================================================================
 

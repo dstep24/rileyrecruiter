@@ -204,3 +204,15 @@ export {
   type AssessmentFlag,
   type DimensionScore as AssessmentDimensionScore,
 } from './AssessmentScorer.js';
+
+// Outreach Template Service
+export {
+  OutreachTemplateService,
+  outreachTemplateService,
+  getOutreachTemplateService,
+  type OutreachCategory,
+  type TemplateChannel,
+  type CreateTemplateInput as CreateOutreachTemplateInput,
+  type UpdateTemplateInput as UpdateOutreachTemplateInput,
+  type TemplateVariables,
+} from './OutreachTemplateService.js';
