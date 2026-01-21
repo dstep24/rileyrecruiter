@@ -491,6 +491,7 @@ model PreScreeningTemplate {
   name             String                    // "Senior Engineer Screen"
   description      String?
   roleType         String?                   // "engineering", "sales", etc.
+  companyName      String?                   // Company name for internal tracking (NOT shown to candidates)
   isActive         Boolean  @default(true)
 
   // Link to job requisition (optional - if set, this is a job-specific assessment)

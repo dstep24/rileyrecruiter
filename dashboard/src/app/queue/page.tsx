@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Check,
   X,
@@ -23,6 +23,7 @@ import {
   Brain,
   ClipboardList,
   Link2,
+  Copy,
 } from 'lucide-react';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
@@ -60,6 +61,19 @@ interface QueuedCandidate {
   trackerId?: string;
   acceptedAt?: string;
   pitchSentAt?: string;
+}
+
+interface JobRequisition {
+  id: string;
+  title: string;
+  status: string;
+}
+
+interface AssessmentTemplate {
+  id: string;
+  name: string;
+  jobTitle?: string;
+  status: string;
 }
 
 interface UnipileConfig {
@@ -131,13 +145,55 @@ export default function QueuePage() {
   const [generatingAI, setGeneratingAI] = useState<Set<string>>(new Set());
   const [hasAiKey, setHasAiKey] = useState<boolean | null>(null);
   const [fetchingAssessment, setFetchingAssessment] = useState<Set<string>>(new Set());
+  const [copiedAssessmentLink, setCopiedAssessmentLink] = useState<string | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [assessmentTemplates, setAssessmentTemplates] = useState<AssessmentTemplate[]>([]);
+  const [linkingAssessment, setLinkingAssessment] = useState<string | null>(null); // candidate id being linked
 
   // Load Unipile config, AI key status, and queue from localStorage on mount
   useEffect(() => {
     loadUnipileConfig();
     loadQueue();
     checkAiKey();
+    fetchAssessmentTemplates();
   }, []);
+
+  // Fetch available assessment templates for linking
+  const fetchAssessmentTemplates = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/assessments/templates`);
+      if (response.ok) {
+        const data = await response.json();
+        // API returns { templates: [...] }
+        setAssessmentTemplates(data.templates || []);
+      }
+    } catch {
+      // Use mock data for demo
+      setAssessmentTemplates([
+        { id: 'tmpl-1', name: 'Senior Software Engineer Assessment', jobTitle: 'Senior Software Engineer', status: 'active' },
+        { id: 'tmpl-2', name: 'Product Manager Assessment', jobTitle: 'Product Manager', status: 'active' },
+        { id: 'tmpl-3', name: 'Data Scientist Assessment', jobTitle: 'Data Scientist', status: 'active' },
+      ]);
+    }
+  };
+
+  // Link an assessment template to a candidate
+  const linkAssessmentToCandidate = (itemId: string, templateId: string) => {
+    const template = assessmentTemplates.find(t => t.id === templateId);
+    const updatedQueue = queue.map((item) =>
+      item.id === itemId ? {
+        ...item,
+        assessmentTemplateId: templateId,
+        searchCriteria: {
+          ...item.searchCriteria,
+          jobTitle: template?.jobTitle || template?.name || item.searchCriteria?.jobTitle || '',
+          skills: item.searchCriteria?.skills || [],
+        }
+      } : item
+    );
+    saveQueue(updatedQueue);
+    setLinkingAssessment(null);
+  };
 
   const checkAiKey = () => {
     const key = localStorage.getItem('riley_anthropic_api_key');
@@ -297,29 +353,65 @@ Best regards`;
     }
   };
 
-  // Generate assessment link and add to message
+  // Generate assessment link and add to message at cursor position
   const addAssessmentToMessage = async (item: QueuedCandidate) => {
     const url = await fetchAssessmentLink(item);
     if (url) {
-      // Update the draft to include the assessment link
       const currentDraft = item.messageDraft || generateDefaultMessage(item);
-      const assessmentNote = `\n\nTo help me understand your background better, please complete this brief assessment: ${url}`;
 
       // Don't add if already present
-      if (!currentDraft.includes(url)) {
-        const updatedDraft = currentDraft + assessmentNote;
-        const updatedQueue = queue.map((q) =>
-          q.id === item.id ? { ...q, messageDraft: updatedDraft, assessmentUrl: url } : q
-        );
-        saveQueue(updatedQueue);
+      if (currentDraft.includes(url)) {
+        return;
+      }
+
+      let updatedDraft: string;
+
+      // If editing with textarea, insert at cursor position
+      if (editingDraft === item.id && textareaRef.current) {
+        const textarea = textareaRef.current;
+        const start = textarea.selectionStart;
+        const end = textarea.selectionEnd;
+        const textBefore = draftText.substring(0, start);
+        const textAfter = draftText.substring(end);
+
+        // Insert just the URL at cursor position
+        updatedDraft = textBefore + url + textAfter;
+        setDraftText(updatedDraft);
+
+        // Update cursor position after the inserted URL
+        setTimeout(() => {
+          textarea.selectionStart = textarea.selectionEnd = start + url.length;
+          textarea.focus();
+        }, 0);
+      } else {
+        // Not editing - append to end with full sentence
+        const assessmentNote = `\n\nTo help me understand your background better, please complete this brief assessment: ${url}`;
+        updatedDraft = currentDraft + assessmentNote;
 
         // If editing, update the draft text
         if (editingDraft === item.id) {
           setDraftText(updatedDraft);
         }
       }
+
+      // Save to queue with assessmentUrl
+      const updatedQueue = queue.map((q) =>
+        q.id === item.id ? { ...q, messageDraft: updatedDraft, assessmentUrl: url } : q
+      );
+      saveQueue(updatedQueue);
     } else {
       setError('Could not generate assessment link. Make sure the candidate has a job requisition linked.');
+    }
+  };
+
+  // Copy assessment link to clipboard
+  const copyAssessmentLink = async (url: string) => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedAssessmentLink(url);
+      setTimeout(() => setCopiedAssessmentLink(null), 2000);
+    } catch {
+      setError('Failed to copy link to clipboard');
     }
   };
 
@@ -910,6 +1002,7 @@ Best regards`;
                         {editingDraft === item.id ? (
                           <>
                             <textarea
+                              ref={textareaRef}
                               value={draftText}
                               onChange={(e) => setDraftText(e.target.value)}
                               rows={8}
@@ -946,10 +1039,29 @@ Best regards`;
                                   </button>
                                 )}
                                 {item.assessmentUrl && (
-                                  <span className="px-3 py-1.5 bg-green-50 text-green-700 rounded-lg text-sm flex items-center gap-1">
+                                  <button
+                                    onClick={() => {
+                                      // Insert assessment URL at cursor position in textarea
+                                      if (textareaRef.current) {
+                                        const textarea = textareaRef.current;
+                                        const start = textarea.selectionStart;
+                                        const end = textarea.selectionEnd;
+                                        const textBefore = draftText.substring(0, start);
+                                        const textAfter = draftText.substring(end);
+                                        const updatedDraft = textBefore + item.assessmentUrl + textAfter;
+                                        setDraftText(updatedDraft);
+                                        setTimeout(() => {
+                                          textarea.selectionStart = textarea.selectionEnd = start + (item.assessmentUrl?.length || 0);
+                                          textarea.focus();
+                                        }, 0);
+                                      }
+                                    }}
+                                    className="px-3 py-1.5 bg-green-100 text-green-700 rounded-lg text-sm hover:bg-green-200 flex items-center gap-1"
+                                    title="Insert assessment link at cursor position"
+                                  >
                                     <Link2 className="h-3 w-3" />
-                                    Assessment Added
-                                  </span>
+                                    Insert Link
+                                  </button>
                                 )}
                               </div>
                               <div className="flex gap-2">
@@ -1069,6 +1181,92 @@ Best regards`;
                           </div>
                         </div>
                       )}
+
+                      {/* Assessment Link Section - Always show */}
+                      <div>
+                        <h4 className="text-sm font-medium text-gray-700 mb-2">Assessment Link</h4>
+                        <div className="bg-white rounded-lg border border-gray-200 p-4 text-sm">
+                          {item.assessmentUrl ? (
+                            <div className="space-y-2">
+                              <div className="flex items-center gap-2">
+                                <Link2 className="h-4 w-4 text-green-600" />
+                                <span className="text-green-700 font-medium">Link Available</span>
+                              </div>
+                              <div className="flex items-center gap-2 bg-gray-50 p-2 rounded border">
+                                <code className="text-xs text-gray-600 flex-1 truncate">{item.assessmentUrl}</code>
+                                <button
+                                  onClick={() => copyAssessmentLink(item.assessmentUrl!)}
+                                  className="p-1 hover:bg-gray-200 rounded"
+                                  title="Copy link"
+                                >
+                                  {copiedAssessmentLink === item.assessmentUrl ? (
+                                    <Check className="h-4 w-4 text-green-600" />
+                                  ) : (
+                                    <Copy className="h-4 w-4 text-gray-500" />
+                                  )}
+                                </button>
+                              </div>
+                              <p className="text-xs text-gray-500">
+                                Click &quot;Edit Message&quot; and use &quot;Insert Link&quot; to add at cursor position
+                              </p>
+                            </div>
+                          ) : item.jobRequisitionId ? (
+                            <div className="space-y-2">
+                              <p className="text-gray-500 text-sm">No assessment link generated yet</p>
+                              <button
+                                onClick={() => addAssessmentToMessage(item)}
+                                disabled={fetchingAssessment.has(item.id)}
+                                className="px-3 py-1.5 bg-green-100 text-green-700 rounded-lg text-sm hover:bg-green-200 flex items-center gap-1 disabled:opacity-50"
+                              >
+                                {fetchingAssessment.has(item.id) ? (
+                                  <Loader2 className="h-3 w-3 animate-spin" />
+                                ) : (
+                                  <ClipboardList className="h-3 w-3" />
+                                )}
+                                Generate Assessment Link
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="space-y-3">
+                              <p className="text-gray-500 text-sm">No assessment linked</p>
+                              {linkingAssessment === item.id ? (
+                                <div className="space-y-2">
+                                  <select
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                    onChange={(e) => {
+                                      if (e.target.value) {
+                                        linkAssessmentToCandidate(item.id, e.target.value);
+                                      }
+                                    }}
+                                    defaultValue=""
+                                  >
+                                    <option value="" disabled>Select an assessment...</option>
+                                    {assessmentTemplates.filter(t => t.status === 'active').map((template) => (
+                                      <option key={template.id} value={template.id}>
+                                        {template.name}
+                                      </option>
+                                    ))}
+                                  </select>
+                                  <button
+                                    onClick={() => setLinkingAssessment(null)}
+                                    className="text-xs text-gray-500 hover:text-gray-700"
+                                  >
+                                    Cancel
+                                  </button>
+                                </div>
+                              ) : (
+                                <button
+                                  onClick={() => setLinkingAssessment(item.id)}
+                                  className="px-3 py-1.5 bg-blue-100 text-blue-700 rounded-lg text-sm hover:bg-blue-200 flex items-center gap-1"
+                                >
+                                  <Link2 className="h-3 w-3" />
+                                  Link Assessment
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </div>
 
                       {item.providerId && (
                         <div>
