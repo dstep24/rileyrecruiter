@@ -15,6 +15,7 @@ import webhooksRoutes from './routes/webhooks.js'; // Webhook handlers for exter
 import assessmentsRoutes from './routes/assessments.js'; // Pre-screening assessment routes
 import outreachTemplatesRoutes from './routes/outreach-templates.js'; // Outreach template management
 import outreachRoutes from './routes/outreach.js'; // Outreach tracking routes
+import outreachSettingsRoutes from './routes/outreach-settings.js'; // Outreach settings (autopilot, etc.)
 import notificationsRoutes from './routes/notifications.js'; // Notification routes
 
 // =============================================================================
