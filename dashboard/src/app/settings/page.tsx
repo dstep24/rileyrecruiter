@@ -990,12 +990,24 @@ export default function SettingsPage() {
           return localStorage.getItem('riley_autopilot_mode') === 'true';
         };
 
-        const toggleAutopilotMode = (enabled: boolean) => {
+        const toggleAutopilotMode = async (enabled: boolean) => {
+          // Save to localStorage for immediate UI update
           localStorage.setItem('riley_autopilot_mode', enabled ? 'true' : 'false');
           setSettings({
             ...settings,
             autonomy: { ...settings.autonomy, autopilotMode: enabled },
           });
+
+          // Sync with server
+          try {
+            await fetch(`${API_BASE}/api/outreach-settings/autopilot`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ enabled }),
+            });
+          } catch (err) {
+            console.error('Failed to sync autopilot setting:', err);
+          }
         };
 
         const autopilotEnabled = settings.autonomy.autopilotMode ?? getAutopilotMode();
