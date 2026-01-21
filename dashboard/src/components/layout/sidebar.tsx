@@ -16,6 +16,7 @@ import {
   MessageSquare,
   Brain,
   AlertCircle,
+  ClipboardList,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -24,6 +25,7 @@ const navigation = [
   { name: 'Approval Queue', href: '/queue', icon: CheckSquare },
   { name: 'Sourcing', href: '/sourcing', icon: Search },
   { name: 'Conversations', href: '/conversations', icon: MessageSquare },
+  { name: 'Assessments', href: '/assessments', icon: ClipboardList },
   { name: 'Guidelines', href: '/guidelines', icon: FileText },
   { name: 'Criteria', href: '/criteria', icon: Target },
   { name: 'Tenants', href: '/tenants', icon: Building2 },

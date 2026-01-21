@@ -16,7 +16,9 @@ import {
   Loader2,
   Plus,
   X,
+  ClipboardList,
 } from 'lucide-react';
+import AssessmentResultCard from '../../components/AssessmentResultCard';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
 
@@ -91,6 +93,11 @@ export default function ConversationsPage() {
   const [newConversationUrl, setNewConversationUrl] = useState('');
   const [newConversationMessage, setNewConversationMessage] = useState('');
   const [isStartingConversation, setIsStartingConversation] = useState(false);
+
+  // Assessment state
+  const [assessmentTemplates, setAssessmentTemplates] = useState<{ id: string; name: string }[]>([]);
+  const [selectedAssessment, setSelectedAssessment] = useState<unknown>(null);
+  const [loadingAssessment, setLoadingAssessment] = useState(false);
 
   // Load Unipile config from localStorage
   useEffect(() => {
@@ -266,6 +273,82 @@ export default function ConversationsPage() {
     const interval = setInterval(fetchData, 30000);
     return () => clearInterval(interval);
   }, [fetchData]);
+
+  // Fetch assessment templates
+  useEffect(() => {
+    async function fetchTemplates() {
+      try {
+        const res = await fetch(`${API_BASE}/api/assessments/templates?activeOnly=true`);
+        const data = await res.json();
+        if (data.success) {
+          setAssessmentTemplates(data.templates.map((t: { id: string; name: string }) => ({ id: t.id, name: t.name })));
+        }
+      } catch (err) {
+        console.error('Failed to fetch assessment templates:', err);
+      }
+    }
+    fetchTemplates();
+  }, []);
+
+  // Fetch assessment for selected conversation
+  useEffect(() => {
+    async function fetchAssessment() {
+      if (!selectedConversation) {
+        setSelectedAssessment(null);
+        return;
+      }
+      setLoadingAssessment(true);
+      try {
+        const res = await fetch(`${API_BASE}/api/assessments/conversation/${selectedConversation.id}`);
+        const data = await res.json();
+        if (data.success) {
+          setSelectedAssessment(data.assessment);
+        } else {
+          setSelectedAssessment(null);
+        }
+      } catch (err) {
+        console.error('Failed to fetch assessment:', err);
+        setSelectedAssessment(null);
+      } finally {
+        setLoadingAssessment(false);
+      }
+    }
+    fetchAssessment();
+  }, [selectedConversation]);
+
+  // Send assessment to candidate
+  const sendAssessment = async (templateId: string) => {
+    if (!selectedConversation) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/assessments/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          templateId,
+          conversationId: selectedConversation.id,
+          candidateName: selectedConversation.candidateName,
+        }),
+      });
+      const data = await res.json();
+      if (data.success && data.assessmentLink?.url) {
+        // Copy link to clipboard and show in chat
+        navigator.clipboard.writeText(data.assessmentLink.url);
+        alert(`Assessment link copied to clipboard!\n\n${data.assessmentLink.url}\n\nSend this link to the candidate.`);
+        // Refresh assessment data
+        setSelectedAssessment(null);
+        const refreshRes = await fetch(`${API_BASE}/api/assessments/conversation/${selectedConversation.id}`);
+        const refreshData = await refreshRes.json();
+        if (refreshData.success) {
+          setSelectedAssessment(refreshData.assessment);
+        }
+      } else {
+        alert(data.error || 'Failed to create assessment link');
+      }
+    } catch (err) {
+      console.error('Failed to send assessment:', err);
+      alert('Failed to send assessment');
+    }
+  };
 
   // Send a reply
   const sendReply = async () => {

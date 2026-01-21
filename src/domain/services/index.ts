@@ -181,3 +181,26 @@ export {
   type ResponseGenerationContext,
   type GeneratedResponse,
 } from './ConversationService.js';
+
+// Pre-Screening Assessment Service
+export {
+  PreScreeningService,
+  preScreeningService,
+  type CreateTemplateInput,
+  type CreateQuestionInput,
+  type CreateAssessmentLinkInput,
+  type AssessmentLinkResult,
+  type SubmitAnswersInput,
+  type AssessmentFormData,
+  type AssessmentResult,
+} from './PreScreeningService.js';
+
+// Assessment Scorer (AI-powered)
+export {
+  AssessmentScorer,
+  assessmentScorer,
+  type ScoringContext,
+  type ScoringResult,
+  type AssessmentFlag,
+  type DimensionScore as AssessmentDimensionScore,
+} from './AssessmentScorer.js';
