@@ -673,12 +673,14 @@ export default function SourcingPage() {
       if (response.ok) {
         const data = await response.json();
 
-        // Update candidates with new 3-pillar sourcing scores
+        // Build score map and updated candidates
+        const scoreMap = new Map<string, SourcingScore>(
+          data.scores.map((s: SourcingScore) => [s.candidateId, s])
+        );
+
+        // Update state
         setSearchRun(prev => {
           if (!prev) return null;
-          const scoreMap = new Map<string, SourcingScore>(
-            data.scores.map((s: SourcingScore) => [s.candidateId, s])
-          );
           const updatedCandidates = prev.candidates.map(c => {
             const sourcingScore = scoreMap.get(c.id);
             return {
@@ -689,7 +691,22 @@ export default function SourcingPage() {
             };
           });
 
-          // Update Riley context with scored candidates for chat awareness
+          return {
+            ...prev,
+            candidates: updatedCandidates,
+            sourcingScoreSummary: data.summary,
+            sourcingAiPowered: data.aiPowered,
+          };
+        });
+
+        // Update Riley context with scored candidates for chat awareness (outside state callback)
+        const currentRun = searchRunRef.current;
+        if (currentRun) {
+          const updatedCandidates = currentRun.candidates.map(c => {
+            const sourcingScore = scoreMap.get(c.id);
+            return { ...c, sourcingScore };
+          });
+
           setCandidatesInPipeline(
             updatedCandidates.map(c => ({
               name: c.name,
@@ -704,14 +721,7 @@ export default function SourcingPage() {
           // Log activity
           const qualifiedCount = updatedCandidates.filter(c => (c.sourcingScore?.overallScore ?? 0) >= 70).length;
           logActivity('AI Scoring', `Scored ${updatedCandidates.length} candidates - ${qualifiedCount} qualified (70+)`);
-
-          return {
-            ...prev,
-            candidates: updatedCandidates,
-            sourcingScoreSummary: data.summary,
-            sourcingAiPowered: data.aiPowered,
-          };
-        });
+        }
       }
       } finally {
         clearTimeout(timeoutId);
