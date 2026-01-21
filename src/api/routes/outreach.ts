@@ -15,6 +15,13 @@ import type { OutreachType, OutreachStatus } from '../../generated/prisma/index.
 
 const router = Router();
 
+// Helper to get string from query param (handles string | string[] | undefined)
+function getQueryString(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value) && typeof value[0] === 'string') return value[0];
+  return undefined;
+}
+
 // =============================================================================
 // TRACKING ENDPOINTS
 // =============================================================================
@@ -85,7 +92,8 @@ router.post('/track', async (req: Request, res: Response) => {
  */
 router.get('/tracker/:id', async (req: Request, res: Response) => {
   try {
-    const tracker = await outreachTrackerRepo.getById(req.params.id);
+    const trackerId = req.params.id as string;
+    const tracker = await outreachTrackerRepo.getById(trackerId);
 
     if (!tracker) {
       return res.status(404).json({ error: 'Tracker not found' });
@@ -106,7 +114,7 @@ router.get('/tracker/:id', async (req: Request, res: Response) => {
  */
 router.get('/pending-pitches', async (req: Request, res: Response) => {
   try {
-    const tenantId = req.query.tenantId as string | undefined;
+    const tenantId = getQueryString(req.query.tenantId);
     const trackers = await outreachTrackerRepo.getPendingPitches(tenantId);
 
     return res.json({
@@ -127,9 +135,9 @@ router.get('/pending-pitches', async (req: Request, res: Response) => {
  */
 router.get('/by-status/:status', async (req: Request, res: Response) => {
   try {
-    const status = req.params.status.toUpperCase() as OutreachStatus;
-    const limit = parseInt(req.query.limit as string) || 50;
-    const tenantId = req.query.tenantId as string | undefined;
+    const status = (req.params.status as string).toUpperCase() as OutreachStatus;
+    const limit = parseInt(getQueryString(req.query.limit) || '50');
+    const tenantId = getQueryString(req.query.tenantId);
 
     const trackers = await outreachTrackerRepo.listByStatus(status, { limit, tenantId });
 
@@ -151,8 +159,8 @@ router.get('/by-status/:status', async (req: Request, res: Response) => {
  */
 router.get('/all', async (req: Request, res: Response) => {
   try {
-    const limit = parseInt(req.query.limit as string) || 100;
-    const tenantId = req.query.tenantId as string | undefined;
+    const limit = parseInt(getQueryString(req.query.limit) || '100');
+    const tenantId = getQueryString(req.query.tenantId);
 
     const trackers = await outreachTrackerRepo.listAll({ limit, tenantId });
 
@@ -174,7 +182,8 @@ router.get('/all', async (req: Request, res: Response) => {
  */
 router.post('/:id/send-pitch', async (req: Request, res: Response) => {
   try {
-    const tracker = await outreachTrackerRepo.getById(req.params.id);
+    const trackerId = req.params.id as string;
+    const tracker = await outreachTrackerRepo.getById(trackerId);
 
     if (!tracker) {
       return res.status(404).json({ error: 'Tracker not found' });
@@ -214,7 +223,7 @@ router.post('/:id/send-pitch', async (req: Request, res: Response) => {
  */
 router.get('/stats', async (req: Request, res: Response) => {
   try {
-    const tenantId = req.query.tenantId as string | undefined;
+    const tenantId = getQueryString(req.query.tenantId);
     const stats = await outreachTrackerRepo.getStats(tenantId);
 
     return res.json({
@@ -234,7 +243,7 @@ router.get('/stats', async (req: Request, res: Response) => {
  */
 router.get('/funnel', async (req: Request, res: Response) => {
   try {
-    const tenantId = req.query.tenantId as string | undefined;
+    const tenantId = getQueryString(req.query.tenantId);
     const funnel = await outreachTrackerRepo.getFunnelStats(tenantId);
 
     return res.json({

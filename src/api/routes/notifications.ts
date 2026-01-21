@@ -10,13 +10,20 @@ import { getNotificationService } from '../../domain/services/NotificationServic
 
 const router = Router();
 
+// Helper to get string from query param (handles string | string[] | undefined)
+function getQueryString(value: unknown, defaultValue: string): string {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value) && typeof value[0] === 'string') return value[0];
+  return defaultValue;
+}
+
 /**
  * GET /api/notifications - Get all notifications
  */
 router.get('/', async (req: Request, res: Response) => {
   try {
-    const tenantId = (req.query.tenantId as string) || 'development';
-    const limit = parseInt(req.query.limit as string) || 50;
+    const tenantId = getQueryString(req.query.tenantId, 'development');
+    const limit = parseInt(getQueryString(req.query.limit, '50'));
 
     const notificationService = getNotificationService(tenantId);
     const notifications = await notificationService.getAll(limit);
@@ -39,7 +46,7 @@ router.get('/', async (req: Request, res: Response) => {
  */
 router.get('/unread', async (req: Request, res: Response) => {
   try {
-    const tenantId = (req.query.tenantId as string) || 'development';
+    const tenantId = getQueryString(req.query.tenantId, 'development');
 
     const notificationService = getNotificationService(tenantId);
     const notifications = await notificationService.getUnread();
@@ -63,7 +70,7 @@ router.get('/unread', async (req: Request, res: Response) => {
  */
 router.get('/count', async (req: Request, res: Response) => {
   try {
-    const tenantId = (req.query.tenantId as string) || 'development';
+    const tenantId = getQueryString(req.query.tenantId, 'development');
 
     const notificationService = getNotificationService(tenantId);
     const count = await notificationService.getUnreadCount();
@@ -85,8 +92,8 @@ router.get('/count', async (req: Request, res: Response) => {
  */
 router.post('/:id/read', async (req: Request, res: Response) => {
   try {
-    const tenantId = (req.query.tenantId as string) || 'development';
-    const notificationId = req.params.id;
+    const tenantId = getQueryString(req.query.tenantId, 'development');
+    const notificationId = req.params.id as string;
 
     const notificationService = getNotificationService(tenantId);
     const notification = await notificationService.markRead(notificationId);
@@ -112,7 +119,7 @@ router.post('/:id/read', async (req: Request, res: Response) => {
  */
 router.post('/read-all', async (req: Request, res: Response) => {
   try {
-    const tenantId = (req.query.tenantId as string) || 'development';
+    const tenantId = getQueryString(req.query.tenantId, 'development');
 
     const notificationService = getNotificationService(tenantId);
     const count = await notificationService.markAllRead();
@@ -134,8 +141,8 @@ router.post('/read-all', async (req: Request, res: Response) => {
  */
 router.delete('/:id', async (req: Request, res: Response) => {
   try {
-    const tenantId = (req.query.tenantId as string) || 'development';
-    const notificationId = req.params.id;
+    const tenantId = getQueryString(req.query.tenantId, 'development');
+    const notificationId = req.params.id as string;
 
     const notificationService = getNotificationService(tenantId);
     const deleted = await notificationService.delete(notificationId);
@@ -161,7 +168,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
  */
 router.delete('/', async (req: Request, res: Response) => {
   try {
-    const tenantId = (req.query.tenantId as string) || 'development';
+    const tenantId = getQueryString(req.query.tenantId, 'development');
 
     const notificationService = getNotificationService(tenantId);
     const count = await notificationService.clearAll();

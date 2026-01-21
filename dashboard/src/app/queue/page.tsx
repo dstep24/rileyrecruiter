@@ -43,7 +43,7 @@ interface QueuedCandidate {
   profileUrl: string;
   profilePictureUrl?: string;
   relevanceScore: number;
-  status: 'pending' | 'approved' | 'sent' | 'rejected' | 'failed';
+  status: 'pending' | 'approved' | 'sent' | 'connection_accepted' | 'pitch_pending' | 'pitch_sent' | 'replied' | 'rejected' | 'failed';
   messageType: 'connection_request' | 'connection_only' | 'inmail' | 'message';
   messageDraft?: string;
   createdAt: string;
@@ -56,6 +56,10 @@ interface QueuedCandidate {
   jobRequisitionId?: string;
   assessmentTemplateId?: string;
   assessmentUrl?: string;
+  // Outreach tracking
+  trackerId?: string;
+  acceptedAt?: string;
+  pitchSentAt?: string;
 }
 
 interface UnipileConfig {
@@ -90,8 +94,24 @@ const statusColors: Record<string, string> = {
   pending: 'bg-yellow-100 text-yellow-800',
   approved: 'bg-blue-100 text-blue-800',
   sent: 'bg-green-100 text-green-800',
+  connection_accepted: 'bg-emerald-100 text-emerald-800',
+  pitch_pending: 'bg-purple-100 text-purple-800',
+  pitch_sent: 'bg-indigo-100 text-indigo-800',
+  replied: 'bg-cyan-100 text-cyan-800',
   rejected: 'bg-gray-100 text-gray-800',
   failed: 'bg-red-100 text-red-800',
+};
+
+const statusLabels: Record<string, string> = {
+  pending: 'Pending',
+  approved: 'Approved',
+  sent: 'Sent',
+  connection_accepted: 'Connected',
+  pitch_pending: 'Ready to Pitch',
+  pitch_sent: 'Pitch Sent',
+  replied: 'Replied',
+  rejected: 'Rejected',
+  failed: 'Failed',
 };
 
 // =============================================================================
