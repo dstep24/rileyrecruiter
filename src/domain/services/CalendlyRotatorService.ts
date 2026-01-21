@@ -325,6 +325,122 @@ export class CalendlyRotatorService {
     });
   }
 
+  /**
+   * Find recent unconfirmed assignment by Calendly link URL.
+   * Used when matching Calendly webhooks which only contain the event URI.
+   */
+  async findRecentUnconfirmedAssignment(
+    calendlyUrl: string,
+    withinHours: number = 72
+  ): Promise<CalendlyLinkAssignment | null> {
+    const cutoff = new Date();
+    cutoff.setHours(cutoff.getHours() - withinHours);
+
+    // First, find the link by URL
+    const link = await prisma.recruiterCalendlyLink.findFirst({
+      where: {
+        calendlyUrl: {
+          startsWith: calendlyUrl.split('/').slice(0, 4).join('/'), // Match base Calendly URL
+        },
+      },
+    });
+
+    if (!link) {
+      return null;
+    }
+
+    // Find the most recent unconfirmed assignment for this link
+    return prisma.calendlyLinkAssignment.findFirst({
+      where: {
+        calendlyLinkId: link.id,
+        bookingConfirmed: false,
+        linkSentAt: {
+          gte: cutoff,
+        },
+      },
+      include: {
+        calendlyLink: true,
+      },
+      orderBy: { linkSentAt: 'desc' },
+    });
+  }
+
+  /**
+   * Find assignment by candidate name (case-insensitive partial match).
+   * Used when matching Calendly webhooks by invitee name.
+   */
+  async findAssignmentByCandidateName(
+    candidateName: string,
+    calendlyLinkId?: string,
+    withinHours: number = 72
+  ): Promise<CalendlyLinkAssignment | null> {
+    const cutoff = new Date();
+    cutoff.setHours(cutoff.getHours() - withinHours);
+
+    return prisma.calendlyLinkAssignment.findFirst({
+      where: {
+        candidateName: {
+          contains: candidateName,
+          mode: 'insensitive',
+        },
+        bookingConfirmed: false,
+        linkSentAt: {
+          gte: cutoff,
+        },
+        ...(calendlyLinkId && { calendlyLinkId }),
+      },
+      include: {
+        calendlyLink: true,
+      },
+      orderBy: { linkSentAt: 'desc' },
+    });
+  }
+
+  /**
+   * Confirm booking and update conversation stage.
+   * Also updates the linked Riley conversation to SCHEDULED status.
+   */
+  async confirmBookingWithConversation(
+    assignmentId: string,
+    bookingDetails?: {
+      eventUri?: string;
+      eventStartTime?: Date;
+      inviteeEmail?: string;
+    }
+  ): Promise<CalendlyLinkAssignment> {
+    const assignment = await prisma.calendlyLinkAssignment.update({
+      where: { id: assignmentId },
+      data: {
+        bookingConfirmed: true,
+        bookingConfirmedAt: new Date(),
+      },
+      include: {
+        calendlyLink: true,
+      },
+    });
+
+    console.log(`[CalendlyRotator] Booking confirmed: ${assignmentId}`);
+
+    // Update linked conversation stage to SCHEDULED if exists
+    if (assignment.rileyConversationId) {
+      try {
+        await prisma.rileyConversation.update({
+          where: { id: assignment.rileyConversationId },
+          data: {
+            stage: 'SCHEDULED',
+            schedulingRequested: true,
+            scheduledCallAt: bookingDetails?.eventStartTime,
+          },
+        });
+        console.log(`[CalendlyRotator] Updated conversation ${assignment.rileyConversationId} to SCHEDULED`);
+      } catch (error) {
+        console.error('[CalendlyRotator] Failed to update conversation:', error);
+      }
+    }
+
+    return assignment;
+  }
+
   // ===========================================================================
   // HELPERS
   // ===========================================================================

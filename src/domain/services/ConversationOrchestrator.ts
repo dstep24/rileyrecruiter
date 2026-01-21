@@ -36,6 +36,7 @@ import {
   rileyConversationRepo,
   ConversationWithMessages,
 } from '../repositories/RileyConversationRepository.js';
+import { getNotificationService } from './NotificationService.js';
 import type { OutreachTracker, RileyConversationStage, RecruiterCalendlyLink } from '../../generated/prisma/index.js';
 
 // =============================================================================
@@ -136,6 +137,16 @@ export class ConversationOrchestrator {
     const escalationResult = this.checkEscalationKeywords(message, escalationKeywords);
     if (escalationResult.shouldEscalate) {
       console.log(`[Orchestrator] Escalation keyword detected: ${escalationResult.keyword}`);
+
+      // Send real-time escalation notification
+      const notificationService = getNotificationService(tenantId);
+      await notificationService.notifyEscalationNeeded({
+        conversationId: conversation.id,
+        candidateName: conversation.candidateName || undefined,
+        reason: `Candidate mentioned: ${escalationResult.keyword}`,
+        tenantId,
+      });
+
       return {
         response: '',
         shouldSend: false,
@@ -161,6 +172,16 @@ export class ConversationOrchestrator {
     // If AI decided to escalate
     if (aiResult.shouldEscalate) {
       console.log(`[Orchestrator] AI triggered escalation: ${aiResult.escalationReason}`);
+
+      // Send real-time escalation notification
+      const notificationService = getNotificationService(tenantId);
+      await notificationService.notifyEscalationNeeded({
+        conversationId: conversation.id,
+        candidateName: conversation.candidateName || undefined,
+        reason: aiResult.escalationReason || 'AI triggered escalation',
+        tenantId,
+      });
+
       return {
         response: '',
         shouldSend: false,

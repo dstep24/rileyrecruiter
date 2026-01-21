@@ -144,6 +144,7 @@ export default function QueuePage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [assessmentTemplates, setAssessmentTemplates] = useState<AssessmentTemplate[]>([]);
   const [linkingAssessment, setLinkingAssessment] = useState<string | null>(null); // candidate id being linked
+  const [sendingPitch, setSendingPitch] = useState<Set<string>>(new Set()); // tracking pitch sends
 
   // Load Unipile config, AI key status, and queue from localStorage on mount
   useEffect(() => {
@@ -660,6 +661,47 @@ Best regards`;
       await sendMessage(item);
     }
     setSelectedItems(new Set());
+  };
+
+  // Send pitch to a connected candidate (manual pitch when autopilot is off)
+  const sendPitch = async (item: QueuedCandidate) => {
+    if (!item.trackerId) {
+      setError(`Cannot send pitch to ${item.name}: No outreach tracker found. This candidate may not have been properly tracked.`);
+      return;
+    }
+
+    setSendingPitch((prev) => new Set(prev).add(item.id));
+    setError(null);
+
+    try {
+      const response = await fetch(`${API_BASE}/api/outreach/${item.trackerId}/send-pitch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || `Failed to send pitch: ${response.status}`);
+      }
+
+      const data = await response.json();
+      console.log(`[Queue] Pitch sent to ${item.name}, conversation ID: ${data.conversationId}`);
+
+      // Update item status to pitch_sent
+      const updatedQueue = queue.map((q) =>
+        q.id === item.id ? { ...q, status: 'pitch_sent' as const, pitchSentAt: new Date().toISOString() } : q
+      );
+      saveQueue(updatedQueue);
+    } catch (err) {
+      console.error(`[Queue] Error sending pitch to ${item.name}:`, err);
+      setError(err instanceof Error ? err.message : 'Failed to send pitch');
+    } finally {
+      setSendingPitch((prev) => {
+        const next = new Set(prev);
+        next.delete(item.id);
+        return next;
+      });
+    }
   };
 
   // Remove an item from the queue
@@ -1294,16 +1336,30 @@ Best regards`;
                 Ready to Pitch
               </span>
             </h3>
+            <p className="text-xs text-emerald-600 mt-1">
+              These candidates accepted your connection request. Send them a pitch message to start the conversation.
+            </p>
           </div>
           <div className="divide-y divide-gray-100">
             {acceptedItems.map((item) => (
               <div key={item.id} className="flex items-center gap-4 px-4 py-3">
-                <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-600 text-sm font-medium">
-                  {item.name.split(' ').map((n) => n[0]).join('')}
+                <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-600 text-sm font-medium overflow-hidden">
+                  {item.profilePictureUrl ? (
+                    <img
+                      src={item.profilePictureUrl}
+                      alt={item.name}
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    item.name.split(' ').map((n) => n[0]).join('')
+                  )}
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium text-gray-900 truncate">{item.name}</p>
                   <p className="text-xs text-gray-500">{item.currentTitle} {item.currentCompany && `at ${item.currentCompany}`}</p>
+                  {item.acceptedAt && (
+                    <p className="text-xs text-emerald-600">Connected {formatWaitTime(item.acceptedAt)} ago</p>
+                  )}
                 </div>
                 <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${statusColors[item.status]}`}>
                   {statusLabels[item.status]}
@@ -1318,6 +1374,27 @@ Best regards`;
                   >
                     <ExternalLink className="h-4 w-4" />
                   </a>
+                )}
+                {/* Send Pitch Button */}
+                {item.status === 'pitch_pending' && item.trackerId && (
+                  <button
+                    onClick={() => sendPitch(item)}
+                    disabled={sendingPitch.has(item.id)}
+                    className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-sm hover:bg-emerald-700 flex items-center gap-1.5 disabled:opacity-50"
+                    title="Send pitch message to this candidate"
+                  >
+                    {sendingPitch.has(item.id) ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Send className="h-3.5 w-3.5" />
+                    )}
+                    {sendingPitch.has(item.id) ? 'Sending...' : 'Send Pitch'}
+                  </button>
+                )}
+                {item.status === 'connection_accepted' && !item.trackerId && (
+                  <span className="px-3 py-1.5 bg-gray-100 text-gray-500 rounded-lg text-xs">
+                    No tracker - autopilot may send
+                  </span>
                 )}
               </div>
             ))}

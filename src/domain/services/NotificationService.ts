@@ -9,9 +9,18 @@
  * - Pitch messages sent
  * - Candidate replies
  * - Follow-ups due
+ * - Escalations needing human attention
+ * - Booking confirmations
+ *
+ * Supports real-time notifications via Server-Sent Events (SSE).
  */
 
+import { EventEmitter } from 'events';
 import { prisma } from '../../infrastructure/database/prisma.js';
+
+// Global event emitter for real-time notifications
+export const notificationEvents = new EventEmitter();
+notificationEvents.setMaxListeners(100); // Support many concurrent SSE connections
 
 // =============================================================================
 // TYPES
@@ -23,7 +32,8 @@ export type NotificationType =
   | 'CANDIDATE_REPLIED'
   | 'FOLLOW_UP_DUE'
   | 'ASSESSMENT_COMPLETED'
-  | 'ESCALATION_NEEDED';
+  | 'ESCALATION_NEEDED'
+  | 'BOOKING_CONFIRMED';
 
 export interface Notification {
   id: string;
@@ -48,6 +58,7 @@ export interface CreateNotificationInput {
   candidateName?: string;
   jobTitle?: string;
   tenantId?: string;
+  metadata?: Record<string, unknown>;
 }
 
 // =============================================================================
@@ -108,6 +119,17 @@ export class NotificationService {
     }
 
     console.log('[NotificationService] Created notification:', notification.title);
+
+    // Emit event for real-time SSE subscribers
+    notificationEvents.emit('notification', notification);
+    notificationEvents.emit(`notification:${notification.tenantId}`, notification);
+
+    // Special events for high-priority notifications
+    if (notification.type === 'ESCALATION_NEEDED') {
+      notificationEvents.emit('escalation', notification);
+      notificationEvents.emit(`escalation:${notification.tenantId}`, notification);
+    }
+
     return notification;
   }
 
@@ -189,6 +211,51 @@ export class NotificationService {
       trackerId: data.trackerId,
       candidateName: data.candidateName,
       jobTitle: data.jobTitle,
+      tenantId: data.tenantId,
+    });
+  }
+
+  /**
+   * Create notification for escalation needed (high priority)
+   */
+  async notifyEscalationNeeded(data: {
+    conversationId: string;
+    candidateName?: string;
+    reason: string;
+    jobTitle?: string;
+    tenantId?: string;
+  }): Promise<Notification> {
+    return this.create({
+      type: 'ESCALATION_NEEDED',
+      title: `⚠️ Escalation: ${data.candidateName || 'Candidate'} needs attention`,
+      message: data.reason,
+      conversationId: data.conversationId,
+      candidateName: data.candidateName,
+      jobTitle: data.jobTitle,
+      tenantId: data.tenantId,
+    });
+  }
+
+  /**
+   * Create notification for booking confirmation
+   */
+  async notifyBookingConfirmed(data: {
+    assignmentId: string;
+    candidateName?: string;
+    recruiterName?: string;
+    eventStartTime?: Date;
+    tenantId?: string;
+  }): Promise<Notification> {
+    const timeStr = data.eventStartTime
+      ? ` scheduled for ${data.eventStartTime.toLocaleString()}`
+      : '';
+    return this.create({
+      type: 'BOOKING_CONFIRMED',
+      title: `🎉 Call booked with ${data.candidateName || 'candidate'}`,
+      message: data.recruiterName
+        ? `${data.recruiterName}${timeStr}`
+        : timeStr || undefined,
+      candidateName: data.candidateName,
       tenantId: data.tenantId,
     });
   }

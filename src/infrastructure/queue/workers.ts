@@ -9,9 +9,8 @@
  */
 
 import { Job } from 'bullmq';
-import { getQueueManager, QUEUE_NAMES, JobData } from './TaskQueue.js';
+import { getQueueManager, QUEUE_NAMES, JobData, ScheduledJobData } from './TaskQueue.js';
 import { getPitchSequenceService } from '../../domain/services/PitchSequenceService.js';
-import { getConversationOrchestrator } from '../../domain/services/ConversationOrchestrator.js';
 import { outreachTrackerRepo } from '../../domain/repositories/OutreachTrackerRepository.js';
 
 // =============================================================================
@@ -28,22 +27,34 @@ export const JOB_TYPES = {
 // JOB DATA INTERFACES
 // =============================================================================
 
-export interface FollowUpProcessingJobData extends JobData {
+export interface FollowUpProcessingJobData {
   type: 'scheduled';
   subtype: 'process-follow-ups';
   tenantId: string;
+  scheduledTaskId: string;
+  originalJobType: string;
+  originalJobData: Record<string, unknown>;
 }
 
-export interface DelayedPitchJobData extends JobData {
+export interface DelayedPitchJobData {
   type: 'scheduled';
   subtype: 'send-delayed-pitch';
   tenantId: string;
   trackerId: string;
+  scheduledTaskId: string;
+  originalJobType: string;
+  originalJobData: Record<string, unknown>;
 }
 
 // =============================================================================
 // WORKER PROCESSORS
 // =============================================================================
+
+// Extended scheduled job data with subtype for routing
+interface ExtendedScheduledJobData extends ScheduledJobData {
+  subtype?: string;
+  trackerId?: string;
+}
 
 /**
  * Process the scheduled queue jobs
@@ -56,14 +67,15 @@ async function processScheduledJob(job: Job<JobData>): Promise<unknown> {
     return { skipped: true };
   }
 
-  const subtype = (data as FollowUpProcessingJobData | DelayedPitchJobData).subtype;
+  const extendedData = data as ExtendedScheduledJobData;
+  const subtype = extendedData.subtype || extendedData.originalJobType;
 
   switch (subtype) {
     case 'process-follow-ups':
       return processFollowUpsJob(job);
 
     case 'send-delayed-pitch':
-      return processDelayedPitchJob(job as Job<DelayedPitchJobData>);
+      return processDelayedPitchJob(extendedData);
 
     default:
       console.warn(`[Workers] Unknown scheduled job subtype: ${subtype}`);
@@ -88,18 +100,25 @@ async function processFollowUpsJob(job: Job<JobData>): Promise<{ processed: numb
 /**
  * Send a delayed pitch message to a specific candidate
  */
-async function processDelayedPitchJob(job: Job<DelayedPitchJobData>): Promise<{ success: boolean }> {
-  console.log(`[Workers] Processing delayed pitch for tracker ${job.data.trackerId}`);
+async function processDelayedPitchJob(data: ExtendedScheduledJobData): Promise<{ success: boolean }> {
+  const trackerId = data.trackerId || (data.originalJobData as { trackerId?: string })?.trackerId;
 
-  const tracker = await outreachTrackerRepo.getById(job.data.trackerId);
+  if (!trackerId) {
+    console.warn('[Workers] No trackerId in delayed pitch job data');
+    return { success: false };
+  }
+
+  console.log(`[Workers] Processing delayed pitch for tracker ${trackerId}`);
+
+  const tracker = await outreachTrackerRepo.getById(trackerId);
   if (!tracker) {
-    console.warn(`[Workers] Tracker not found: ${job.data.trackerId}`);
+    console.warn(`[Workers] Tracker not found: ${trackerId}`);
     return { success: false };
   }
 
   // Check if already pitched (in case of duplicate job)
   if (tracker.pitchSentAt) {
-    console.log(`[Workers] Pitch already sent for tracker ${job.data.trackerId}`);
+    console.log(`[Workers] Pitch already sent for tracker ${trackerId}`);
     return { success: true };
   }
 

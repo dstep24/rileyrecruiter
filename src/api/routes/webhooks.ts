@@ -16,6 +16,8 @@ import { RileyAutoResponder } from '../../domain/services/RileyAutoResponder.js'
 import { PitchSequenceService } from '../../domain/services/PitchSequenceService.js';
 import { outreachSettingsService } from '../../domain/services/OutreachSettingsService.js';
 import { getConversationOrchestrator } from '../../domain/services/ConversationOrchestrator.js';
+import { getCalendlyRotatorService } from '../../domain/services/CalendlyRotatorService.js';
+import { getNotificationService } from '../../domain/services/NotificationService.js';
 
 const router = Router();
 
@@ -1178,5 +1180,208 @@ router.post('/riley-conversations/:chatId/close', async (req: Request, res: Resp
     });
   }
 });
+
+// =============================================================================
+// CALENDLY WEBHOOK - Auto-confirm bookings
+// =============================================================================
+
+// Calendly webhook signing key (optional but recommended)
+const CALENDLY_WEBHOOK_SECRET = process.env.CALENDLY_WEBHOOK_SECRET || '';
+
+/**
+ * Calendly webhook payload types
+ * See: https://developer.calendly.com/api-docs/ZG9jOjM2MzE2MDM4-webhook-payload
+ */
+interface CalendlyWebhookPayload {
+  event: 'invitee.created' | 'invitee.canceled' | 'routing_form_submission.created';
+  created_at: string;
+  created_by: string;
+  payload: {
+    cancel_url?: string;
+    created_at: string;
+    email: string;
+    event: string; // Event URI
+    name: string;
+    new_invitee?: string;
+    old_invitee?: string;
+    payment?: unknown;
+    questions_and_answers?: Array<{
+      answer: string;
+      position: number;
+      question: string;
+    }>;
+    reschedule_url?: string;
+    rescheduled?: boolean;
+    routing_form_submission?: string;
+    scheduled_event?: {
+      uri: string;
+      name: string;
+      status: 'active' | 'canceled';
+      start_time: string;
+      end_time: string;
+      event_type: string;
+      location?: {
+        type: string;
+        location?: string;
+        join_url?: string;
+      };
+      invitees_counter: {
+        total: number;
+        active: number;
+        limit: number;
+      };
+      created_at: string;
+      updated_at: string;
+      event_memberships: Array<{
+        user: string;
+        user_email?: string;
+        user_name?: string;
+      }>;
+    };
+    status: 'active' | 'canceled';
+    text_reminder_number?: string;
+    timezone: string;
+    tracking?: {
+      utm_campaign?: string;
+      utm_source?: string;
+      utm_medium?: string;
+      utm_content?: string;
+      utm_term?: string;
+      salesforce_uuid?: string;
+    };
+    updated_at: string;
+    uri: string;
+  };
+}
+
+/**
+ * POST /webhooks/calendly - Receive webhook events from Calendly
+ *
+ * Handles:
+ * - invitee.created: Someone booked a call (auto-confirm the assignment)
+ * - invitee.canceled: Someone canceled a call
+ *
+ * Setup instructions:
+ * 1. Go to Calendly > Integrations > Webhooks
+ * 2. Create a webhook pointing to: https://your-domain.com/webhooks/calendly
+ * 3. Subscribe to events: invitee.created, invitee.canceled
+ * 4. (Optional) Set a signing key and add it as CALENDLY_WEBHOOK_SECRET env var
+ */
+router.post('/calendly', async (req: Request, res: Response) => {
+  try {
+    // Verify webhook signature if secret is configured
+    if (CALENDLY_WEBHOOK_SECRET) {
+      const signature = req.headers['calendly-webhook-signature'] as string | undefined;
+      // Note: Full signature verification requires crypto library
+      // For now, just check if signature header is present
+      if (!signature) {
+        console.warn('[Calendly Webhook] Missing signature header');
+        return res.status(401).json({ error: 'Unauthorized - missing signature' });
+      }
+    }
+
+    const payload = req.body as CalendlyWebhookPayload;
+
+    console.log('[Calendly Webhook] Received event:', payload.event, {
+      inviteeName: payload.payload?.name,
+      inviteeEmail: payload.payload?.email,
+      eventUri: payload.payload?.scheduled_event?.uri,
+    });
+
+    // Handle different event types
+    switch (payload.event) {
+      case 'invitee.created':
+        await handleCalendlyBookingCreated(payload);
+        break;
+
+      case 'invitee.canceled':
+        console.log('[Calendly Webhook] Booking canceled:', payload.payload?.name);
+        // Could optionally mark assignment as canceled
+        break;
+
+      default:
+        console.log('[Calendly Webhook] Unhandled event type:', payload.event);
+    }
+
+    return res.status(200).json({
+      success: true,
+      event: payload.event,
+      processed: true,
+    });
+  } catch (error) {
+    console.error('[Calendly Webhook] Error processing webhook:', error);
+    return res.status(500).json({
+      error: 'Internal server error processing webhook',
+    });
+  }
+});
+
+/**
+ * Handle Calendly booking created event.
+ * Matches the booking to a pending assignment and confirms it.
+ */
+async function handleCalendlyBookingCreated(payload: CalendlyWebhookPayload): Promise<void> {
+  const inviteeName = payload.payload?.name;
+  const inviteeEmail = payload.payload?.email;
+  const eventUri = payload.payload?.scheduled_event?.uri;
+  const eventStartTime = payload.payload?.scheduled_event?.start_time;
+  const eventType = payload.payload?.scheduled_event?.event_type;
+
+  console.log('[Calendly Webhook] Processing booking:', {
+    name: inviteeName,
+    email: inviteeEmail,
+    eventType,
+    startTime: eventStartTime,
+  });
+
+  if (!inviteeName) {
+    console.warn('[Calendly Webhook] Missing invitee name');
+    return;
+  }
+
+  try {
+    const calendlyService = getCalendlyRotatorService();
+
+    // Try to find matching assignment by candidate name
+    // Calendly doesn't have our internal IDs, so we match by name
+    const assignment = await calendlyService.findAssignmentByCandidateName(inviteeName);
+
+    if (!assignment) {
+      console.log('[Calendly Webhook] No matching assignment found for:', inviteeName);
+      // This might be a booking not initiated through Riley
+      return;
+    }
+
+    console.log('[Calendly Webhook] Found matching assignment:', assignment.id);
+
+    // Confirm the booking
+    await calendlyService.confirmBookingWithConversation(assignment.id, {
+      eventUri,
+      eventStartTime: eventStartTime ? new Date(eventStartTime) : undefined,
+      inviteeEmail,
+    });
+
+    // Create notification for the recruiter
+    const notificationService = getNotificationService();
+    await notificationService.create({
+      type: 'BOOKING_CONFIRMED',
+      title: `Call booked with ${inviteeName}`,
+      message: `${inviteeName} has booked a call via Calendly${eventStartTime ? ` for ${new Date(eventStartTime).toLocaleString()}` : ''}`,
+      tenantId: assignment.tenantId,
+      trackerId: undefined,
+      metadata: {
+        assignmentId: assignment.id,
+        calendlyLinkId: assignment.calendlyLinkId,
+        recruiterName: (assignment as { calendlyLink?: { recruiterName?: string } }).calendlyLink?.recruiterName,
+        candidateName: inviteeName,
+        eventStartTime,
+      },
+    });
+
+    console.log('[Calendly Webhook] Booking confirmed and notification sent');
+  } catch (error) {
+    console.error('[Calendly Webhook] Error confirming booking:', error);
+  }
+}
 
 export default router;
