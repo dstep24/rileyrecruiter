@@ -410,7 +410,7 @@ model OutreachTracker {
   messageContent        String?               // The message/note sent
 
   // Outreach channel (for multi-channel support)
-  channel               OutreachChannel       @default(LINKEDIN)
+  channel               OutreachChannel       @default(LINKEDIN_CONNECTION)
 
   // Job context
   jobRequisitionId      String?
@@ -507,6 +507,7 @@ enum OutreachChannel {
   LINKEDIN_CONNECTION       // 300 char limit
   LINKEDIN_INMAIL           // 1900 char limit
   EMAIL                     // No practical limit
+  GITHUB                    // GitHub sourced candidates (future)
 }
 
 // =============================================================================
@@ -876,12 +877,6 @@ enum OutreachType {
   INMAIL                // LinkedIn InMail
   DIRECT_MESSAGE        // Direct LinkedIn message (1st degree)
   EMAIL                 // Cold email outreach via Resend
-}
-
-enum OutreachChannel {
-  LINKEDIN              // LinkedIn messaging/connections
-  EMAIL                 // Email outreach via Resend
-  GITHUB                // GitHub discussions/issues (future)
 }
 
 enum EmailDeliveryStatus {
