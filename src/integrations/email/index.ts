@@ -1,9 +1,17 @@
 /**
  * Email Integration Module
  *
- * Unified interface for email providers:
- * - Gmail (Google Workspace)
- * - Outlook (Microsoft 365)
+ * Two email client types:
+ *
+ * 1. EmailClient (OAuth-based)
+ *    - Gmail (Google Workspace)
+ *    - Outlook (Microsoft 365)
+ *    - For reading/sending from user's own mailbox
+ *
+ * 2. ResendClient (Transactional)
+ *    - Resend API for cold outreach
+ *    - 3,000 free emails/month
+ *    - Webhook-based delivery tracking
  *
  * Features:
  * - Send/receive emails
@@ -12,6 +20,7 @@
  * - Scheduled sending
  */
 
+// OAuth-based Email Client (Gmail/Outlook)
 export {
   EmailClient,
   EmailConfig,
@@ -26,3 +35,28 @@ export {
   initializeEmailClient,
   getEmailClient,
 } from './EmailClient.js';
+
+// Transactional Email Types
+export type {
+  TransactionalEmailConfig,
+  SendTransactionalEmailParams,
+  SendEmailResult,
+  EmailStatusUpdate,
+  TransactionalEmailStatus,
+  ResendWebhookPayload,
+  ResendWebhookEventType,
+  EmailTemplate,
+  RenderTemplateParams,
+  EmailAnalytics,
+  EmailTag,
+  ITransactionalEmailClient,
+} from './TransactionalTypes.js';
+
+// Resend Client (Transactional Email)
+export {
+  ResendClient,
+  initializeResendClient,
+  getResendClient,
+  isResendConfigured,
+  initializeResendClientFromEnv,
+} from './ResendClient.js';
