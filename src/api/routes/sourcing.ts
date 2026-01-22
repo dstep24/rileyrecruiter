@@ -58,6 +58,17 @@ const booleanSearchSchema = z.object({
   maxResults: z.number().int().positive().max(200).default(50),
 });
 
+const githubSearchSchema = z.object({
+  requisitionId: z.string().optional(),
+  language: z.string().optional(),
+  location: z.string().optional(),
+  followers: z.string().optional(), // e.g., ">100", "50..500"
+  repos: z.string().optional(), // e.g., ">10"
+  keywords: z.array(z.string()).optional(),
+  maxResults: z.number().int().positive().max(100).default(50),
+  extractEmails: z.boolean().default(true),
+});
+
 // =============================================================================
 // IN-MEMORY STORAGE (would be Redis/DB in production)
 // =============================================================================
@@ -66,6 +77,7 @@ interface SearchRun {
   id: string;
   tenantId: string;
   requisitionId: string;
+  source: 'linkedin' | 'github';
   status: 'queued' | 'running' | 'completed' | 'failed';
   progress: number;
   totalFound: number;
@@ -80,6 +92,11 @@ interface SearchRun {
     relevanceScore: number;
     fitScore?: number;
     status: string;
+    // GitHub-specific fields
+    email?: string;
+    emailSource?: string;
+    githubUsername?: string;
+    topLanguages?: string[];
   }>;
   criteria?: ParsedJobCriteria;
   error?: string;
@@ -88,6 +105,29 @@ interface SearchRun {
 }
 
 const searchRuns = new Map<string, SearchRun>();
+
+// GitHub search runs stored separately
+interface GitHubSearchRun {
+  id: string;
+  tenantId: string;
+  requisitionId?: string;
+  status: 'queued' | 'running' | 'completed' | 'failed';
+  progress: number;
+  totalFound: number;
+  candidates: GitHubCandidate[];
+  query: {
+    language?: string;
+    location?: string;
+    followers?: string;
+    repos?: string;
+    keywords?: string[];
+  };
+  error?: string;
+  startedAt: Date;
+  completedAt?: Date;
+}
+
+const githubSearchRuns = new Map<string, GitHubSearchRun>();
 
 // =============================================================================
 // ROUTES
