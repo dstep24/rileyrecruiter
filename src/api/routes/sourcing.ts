@@ -1,9 +1,10 @@
 /**
- * Sourcing API Routes - LinkedIn Candidate Search
+ * Sourcing API Routes - LinkedIn & GitHub Candidate Search
  *
- * Endpoints to trigger and manage LinkedIn sourcing:
+ * Endpoints to trigger and manage candidate sourcing:
  * - Parse job descriptions
  * - Execute LinkedIn searches via Unipile
+ * - Execute GitHub searches via GitHub API
  * - Get search results and progress
  * - Manage candidate pipeline
  */
@@ -15,6 +16,12 @@ import { getTenantIdFromRequest } from '../middleware/tenantMiddleware.js';
 import { getSourcingService } from '../../domain/services/SourcingService.js';
 import { getQueueManager } from '../../infrastructure/queue/TaskQueue.js';
 import type { ParsedJobCriteria } from '../../domain/services/JobDescriptionParser.js';
+import {
+  isGitHubConfigured,
+  getGitHubClient,
+  getEmailExtractor,
+  type GitHubCandidate,
+} from '../../integrations/github/index.js';
 
 const router = Router();
 
