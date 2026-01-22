@@ -128,6 +128,22 @@ model Candidate {
   source          String?
   status          CandidateStatus @default(ACTIVE)
   rejectionReason String?
+
+  // GitHub profile fields
+  githubUsername     String?
+  githubUrl          String?
+  githubBio          String?
+  githubFollowers    Int?
+  githubRepos        Int?
+  githubTopLanguages Json?           @default("[]") // Array of language strings
+  githubEmail        String?
+  githubEmailSource  String?         // 'profile' | 'commits'
+
+  // Additional email outreach fields
+  personalEmail      String?
+  emailVerified      Boolean         @default(false)
+  emailSource        String?         // 'github' | 'linkedin' | 'manual'
+
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
   assessments     Assessment[]
@@ -138,6 +154,7 @@ model Candidate {
 
   @@index([tenantId, stage])
   @@index([tenantId, email])
+  @@index([tenantId, githubUsername])
   @@map("candidates")
 }
 
@@ -379,18 +396,21 @@ model RileyMessage {
 // OUTREACH TRACKING
 // =============================================================================
 
-/// Tracks outreach attempts (connection requests, InMails, messages) for lifecycle management
+/// Tracks outreach attempts (connection requests, InMails, messages, emails) for lifecycle management
 model OutreachTracker {
   id                    String                @id @default(uuid())
 
   // Candidate identification
-  candidateProviderId   String                // LinkedIn URN (ACoXXX)
+  candidateProviderId   String                // LinkedIn URN (ACoXXX) or GitHub username
   candidateName         String?
   candidateProfileUrl   String?
 
   // What was sent
-  outreachType          OutreachType          // CONNECTION_REQUEST, INMAIL, MESSAGE
+  outreachType          OutreachType          // CONNECTION_REQUEST, INMAIL, MESSAGE, EMAIL
   messageContent        String?               // The message/note sent
+
+  // Outreach channel (for multi-channel support)
+  channel               OutreachChannel       @default(LINKEDIN)
 
   // Job context
   jobRequisitionId      String?
@@ -413,6 +433,15 @@ model OutreachTracker {
   // Sequence tracking
   sequencePosition      Int                   @default(0)  // 0=initial, 1=pitch, 2=followup1, etc.
   nextFollowUpAt        DateTime?
+
+  // Email tracking fields (for Resend/transactional email)
+  emailAddress          String?               // Target email address
+  emailMessageId        String?               // Resend message ID
+  emailStatus           EmailDeliveryStatus?  // Delivery status from webhook
+  emailOpenedAt         DateTime?
+  emailClickedAt        DateTime?
+  emailBouncedAt        DateTime?
+  emailBounceReason     String?
 
   // Metadata
   sourceQueueItemId     String?               // Original queue item ID
@@ -846,6 +875,24 @@ enum OutreachType {
   CONNECTION_ONLY       // Connection without note
   INMAIL                // LinkedIn InMail
   DIRECT_MESSAGE        // Direct LinkedIn message (1st degree)
+  EMAIL                 // Cold email outreach via Resend
+}
+
+enum OutreachChannel {
+  LINKEDIN              // LinkedIn messaging/connections
+  EMAIL                 // Email outreach via Resend
+  GITHUB                // GitHub discussions/issues (future)
+}
+
+enum EmailDeliveryStatus {
+  QUEUED                // Email queued for sending
+  SENT                  // Email sent by provider
+  DELIVERED             // Email delivered to recipient server
+  OPENED                // Email opened (tracking pixel loaded)
+  CLICKED               // Link in email clicked
+  BOUNCED               // Email bounced (hard or soft)
+  COMPLAINED            // Recipient marked as spam
+  FAILED                // Failed to send
 }
 
 enum OutreachStatus {

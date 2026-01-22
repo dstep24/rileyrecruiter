@@ -55,10 +55,10 @@ export class ResendClient implements ITransactionalEmailClient {
         subject: params.subject,
         html: params.html,
         text: params.text,
-        reply_to: params.replyTo || this.config.replyTo,
+        replyTo: params.replyTo || this.config.replyTo,
         headers: params.headers,
         tags: params.tags?.map((t) => ({ name: t.name, value: t.value })),
-        scheduled_at: params.scheduledAt,
+        scheduledAt: params.scheduledAt,
       });
 
       if (response.error) {

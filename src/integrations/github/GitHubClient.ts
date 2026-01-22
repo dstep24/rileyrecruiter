@@ -454,12 +454,12 @@ export class GitHubClient {
     searchResetAt: Date;
   }> {
     const response = await this.octokit.rateLimit.get();
-    const { rate, search } = response.data.resources;
+    const { core, search } = response.data.resources;
 
     return {
-      remaining: rate.remaining,
-      limit: rate.limit,
-      resetAt: new Date(rate.reset * 1000),
+      remaining: core.remaining,
+      limit: core.limit,
+      resetAt: new Date(core.reset * 1000),
       searchRemaining: search.remaining,
       searchLimit: search.limit,
       searchResetAt: new Date(search.reset * 1000),
