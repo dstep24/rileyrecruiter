@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import {
   Check,
@@ -144,7 +144,7 @@ const statusLabels: Record<string, string> = {
 // Outreach flow types for tab organization
 type OutreachFlow = 'connection' | 'direct';
 
-export default function QueuePage() {
+function QueuePageContent() {
   const searchParams = useSearchParams();
   const [queue, setQueue] = useState<QueuedCandidate[]>([]);
   const [loading, setLoading] = useState(true);
@@ -2129,5 +2129,18 @@ Best regards`;
         }}
       />
     </div>
+  );
+}
+
+// Wrap with Suspense for Next.js 14+ useSearchParams() requirement
+export default function QueuePage() {
+  return (
+    <Suspense fallback={
+      <div className="flex items-center justify-center h-full">
+        <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
+      </div>
+    }>
+      <QueuePageContent />
+    </Suspense>
   );
 }

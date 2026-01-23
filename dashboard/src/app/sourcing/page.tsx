@@ -116,6 +116,11 @@ interface GitHubCandidateScore {
     matchedKeywords: string[]; // Keywords found in bio/company
     totalKeywords: number; // Total keywords searched
   };
+  titleMatch: {
+    score: number; // 0-100
+    matchedTerms: string[]; // Title terms found in bio
+    reasons: string[];
+  };
   contactQuality: {
     score: number;
     reasons: string[]; // e.g., "Email available (high confidence)", "Marked as hireable"
@@ -419,6 +424,7 @@ export default function SourcingPage() {
     keywords: '',
     minFollowers: '',
     minRepos: '',
+    jobTitle: '', // Job title to match against GitHub bio/description
   });
   const [githubCandidates, setGithubCandidates] = useState<GitHubCandidate[]>([]);
   const [isSearchingGithub, setIsSearchingGithub] = useState(false);
@@ -632,6 +638,7 @@ export default function SourcingPage() {
           keywords: allKeywords.join(' '),
           minFollowers: minFollowers,
           minRepos: minRepos,
+          jobTitle: customJD.title || '', // Auto-populate job title from JD
         });
         setGithubKeywordSource('ai');
       } else {
@@ -872,6 +879,7 @@ export default function SourcingPage() {
       keywords: technicalSkills.join(' '),
       minFollowers: minFollowers,
       minRepos: minRepos,
+      jobTitle: customJD.title || '', // Auto-populate job title from JD
     });
     setGithubKeywordSource('basic');
   };
@@ -938,11 +946,12 @@ export default function SourcingPage() {
     return `${query} OR ${contractGroup}`;
   };
 
-  // Score a GitHub candidate against search criteria using 4 pillars
+  // Score a GitHub candidate against search criteria using 5 pillars
   const scoreGitHubCandidate = (
     candidate: GitHubCandidate,
     searchKeywords: string[],
-    requiredLanguage?: string
+    requiredLanguage?: string,
+    targetJobTitle?: string
   ): GitHubCandidateScore => {
     // 1. TECHNICAL FIT (30%) - Languages, repos, stars
     const technicalReasons: string[] = [];
@@ -1041,7 +1050,81 @@ export default function SourcingPage() {
       ? Math.round((matchedKeywords.length / searchKeywords.length) * 100)
       : 50; // Default if no keywords
 
-    // 4. CONTACT QUALITY (20%) - Email, hireable status, portfolio
+    // 4. TITLE MATCH (20%) - Match job title against GitHub bio/description
+    const titleMatchReasons: string[] = [];
+    const titleMatchedTerms: string[] = [];
+    let titleMatchScore = 0;
+
+    if (targetJobTitle) {
+      // Parse job title into meaningful terms (skip common words)
+      const skipWords = new Set(['senior', 'junior', 'mid', 'level', 'lead', 'staff', 'principal', 'i', 'ii', 'iii', 'iv', 'v', 'the', 'a', 'an', 'and', 'or', 'of', 'at', 'in', 'for']);
+      const titleTerms = targetJobTitle.toLowerCase()
+        .split(/[\s\-\/&,]+/)
+        .filter(t => t.length > 2 && !skipWords.has(t));
+
+      // Also check for common title variations
+      const titleVariations: Record<string, string[]> = {
+        'engineer': ['engineer', 'engineering', 'developer', 'dev'],
+        'developer': ['developer', 'dev', 'engineer', 'engineering'],
+        'architect': ['architect', 'architecture'],
+        'devops': ['devops', 'sre', 'platform', 'infrastructure', 'infra'],
+        'sre': ['sre', 'devops', 'reliability', 'platform'],
+        'platform': ['platform', 'infrastructure', 'devops', 'cloud'],
+        'data': ['data', 'analytics', 'ml', 'machine learning', 'ai'],
+        'frontend': ['frontend', 'front-end', 'front end', 'ui', 'react', 'vue', 'angular'],
+        'backend': ['backend', 'back-end', 'back end', 'api', 'server'],
+        'fullstack': ['fullstack', 'full-stack', 'full stack'],
+        'mobile': ['mobile', 'ios', 'android', 'react native', 'flutter'],
+        'researcher': ['researcher', 'research', 'scientist', 'phd'],
+        'scientist': ['scientist', 'researcher', 'research', 'phd'],
+      };
+
+      // Search in bio for title terms
+      const bioText = (candidate.bio || '').toLowerCase();
+
+      for (const term of titleTerms) {
+        // Check direct match
+        if (bioText.includes(term)) {
+          titleMatchedTerms.push(term);
+          titleMatchScore += 25;
+        } else {
+          // Check variations
+          const variations = titleVariations[term] || [];
+          for (const variation of variations) {
+            if (bioText.includes(variation)) {
+              titleMatchedTerms.push(`${term} (as "${variation}")`);
+              titleMatchScore += 20; // Slightly less for variation match
+              break;
+            }
+          }
+        }
+      }
+
+      // Cap the score at 100
+      titleMatchScore = Math.min(100, titleMatchScore);
+
+      if (titleMatchedTerms.length > 0) {
+        titleMatchReasons.push(`Title terms found: ${titleMatchedTerms.join(', ')}`);
+      } else {
+        titleMatchReasons.push('No title match found in bio');
+      }
+
+      // Bonus for explicit job title phrases
+      const bioLower = bioText;
+      if (bioLower.includes('engineer') || bioLower.includes('developer')) {
+        titleMatchScore = Math.min(100, titleMatchScore + 10);
+        titleMatchReasons.push('Has engineering role in bio');
+      }
+      if (bioLower.includes('phd') || bioLower.includes('researcher') || bioLower.includes('scientist')) {
+        titleMatchScore = Math.min(100, titleMatchScore + 10);
+        titleMatchReasons.push('Has research credentials');
+      }
+    } else {
+      titleMatchScore = 50; // Neutral if no job title specified
+      titleMatchReasons.push('No job title filter specified');
+    }
+
+    // 5. CONTACT QUALITY (15%) - Email, hireable status, portfolio
     const contactReasons: string[] = [];
     let contactScore = 0;
 
@@ -1081,12 +1164,14 @@ export default function SourcingPage() {
       contactReasons.push('Has portfolio/blog URL');
     }
 
-    // Calculate overall weighted score
+    // Calculate overall weighted score (5 pillars)
+    // Technical Fit: 25%, Seniority: 20%, Keywords: 20%, Title Match: 20%, Contact: 15%
     const overall = Math.round(
-      technicalScore * 0.30 +
-      seniorityScore * 0.25 +
-      keywordScore * 0.25 +
-      contactScore * 0.20
+      technicalScore * 0.25 +
+      seniorityScore * 0.20 +
+      keywordScore * 0.20 +
+      titleMatchScore * 0.20 +
+      contactScore * 0.15
     );
 
     return {
@@ -1094,6 +1179,7 @@ export default function SourcingPage() {
       technicalFit: { score: Math.min(100, technicalScore), reasons: technicalReasons },
       senioritySignals: { score: Math.min(100, seniorityScore), reasons: seniorityReasons },
       keywordMatch: { score: keywordScore, matchedKeywords, totalKeywords: searchKeywords.length },
+      titleMatch: { score: titleMatchScore, matchedTerms: titleMatchedTerms, reasons: titleMatchReasons },
       contactQuality: { score: Math.min(100, contactScore), reasons: contactReasons },
     };
   };
@@ -4219,6 +4305,22 @@ export default function SourcingPage() {
                 </div>
 
                 <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Job Title (bio match)
+                  </label>
+                  <input
+                    type="text"
+                    value={githubSearchParams.jobTitle}
+                    onChange={(e) => setGithubSearchParams({ ...githubSearchParams, jobTitle: e.target.value })}
+                    placeholder="e.g., AI Researcher, Platform Engineer, Data Scientist"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-gray-500"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Matches against titles developers put in their GitHub bio (e.g., &quot;AI Researcher &amp; PhD Candidate&quot;)
+                  </p>
+                </div>
+
+                <div>
                   <div className="flex items-center justify-between mb-1">
                     <label className="block text-sm font-medium text-gray-700">
                       Keywords (bio search)
@@ -4374,7 +4476,7 @@ export default function SourcingPage() {
                         ? githubSearchParams.keywords.split(/[,\s]+/).map(k => k.trim()).filter(k => k.length > 0)
                         : [];
                       const score = githubCandidateScores.get(candidate.username) ||
-                        scoreGitHubCandidate(candidate, allKeywords, githubSearchParams.language);
+                        scoreGitHubCandidate(candidate, allKeywords, githubSearchParams.language, githubSearchParams.jobTitle);
                       const isExpanded = expandedGithubCandidates.has(candidate.username);
 
                       return (
@@ -4635,6 +4737,47 @@ export default function SourcingPage() {
                                       </div>
                                     ) : (
                                       <span className="text-gray-400">No keyword matches found in bio/company</span>
+                                    )}
+                                  </div>
+                                </div>
+
+                                {/* Title Match */}
+                                <div>
+                                  <div className="flex items-center justify-between text-sm mb-1">
+                                    <span className="font-medium text-gray-700">Title Match</span>
+                                    <span className="text-gray-500">{score.titleMatch.score}%</span>
+                                  </div>
+                                  <div className="w-full bg-gray-200 rounded-full h-2">
+                                    <div
+                                      className={`h-2 rounded-full ${
+                                        score.titleMatch.score >= 70 ? 'bg-green-500' :
+                                        score.titleMatch.score >= 40 ? 'bg-yellow-500' : 'bg-red-400'
+                                      }`}
+                                      style={{ width: `${score.titleMatch.score}%` }}
+                                    />
+                                  </div>
+                                  <div className="mt-1 text-xs text-gray-500">
+                                    {score.titleMatch.matchedTerms.length > 0 ? (
+                                      <div className="flex flex-wrap gap-1 mt-1">
+                                        {score.titleMatch.matchedTerms.map((term, i) => (
+                                          <span key={i} className="px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded text-xs">
+                                            ✓ {term}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    ) : (
+                                      <div>
+                                        {score.titleMatch.reasons.map((reason, i) => (
+                                          <div key={i} className="flex items-start gap-1">
+                                            {reason.includes('No ') || reason.includes('not') ? (
+                                              <XCircle className="h-3 w-3 text-red-400 mt-0.5 flex-shrink-0" />
+                                            ) : (
+                                              <CheckCircle className="h-3 w-3 text-green-500 mt-0.5 flex-shrink-0" />
+                                            )}
+                                            <span>{reason}</span>
+                                          </div>
+                                        ))}
+                                      </div>
                                     )}
                                   </div>
                                 </div>
