@@ -80,7 +80,7 @@ export function RileyChatWidget({ currentPage, context }: RileyChatWidgetProps) 
       // Get Anthropic API key from localStorage (same as other AI features)
       const anthropicApiKey = localStorage.getItem('riley_anthropic_api_key') || '';
 
-      const response = await fetch(`${API_BASE}/api/chat`, {
+      const response = await fetch(`${API_BASE}/api/demo/chat`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

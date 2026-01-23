@@ -22,6 +22,7 @@ import {
   getEmailExtractor,
   type GitHubCandidate,
 } from '../../integrations/github/index.js';
+import { getAIGitHubKeywordGenerator, generateGitHubKeywordsFallback } from '../../domain/services/AIGitHubKeywordGenerator.js';
 
 const router = Router();
 
@@ -167,6 +168,7 @@ router.post('/search', async (req, res, next) => {
       id: runId,
       tenantId,
       requisitionId,
+      source: 'linkedin',
       status: 'queued',
       progress: 0,
       totalFound: 0,
@@ -224,6 +226,7 @@ router.post('/search/boolean', async (req, res, next) => {
       id: runId,
       tenantId,
       requisitionId,
+      source: 'linkedin',
       status: 'queued',
       progress: 0,
       totalFound: 0,
@@ -300,6 +303,191 @@ router.get('/runs', async (req, res, next) => {
         requisitionId: run.requisitionId,
         status: run.status,
         totalFound: run.totalFound,
+        startedAt: run.startedAt,
+        completedAt: run.completedAt,
+      })),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// =============================================================================
+// GITHUB SEARCH ROUTES
+// =============================================================================
+
+/**
+ * GET /sourcing/github/status - Check if GitHub sourcing is available
+ */
+router.get('/github/status', async (req, res) => {
+  const configured = isGitHubConfigured();
+
+  res.json({
+    available: configured,
+    message: configured
+      ? 'GitHub sourcing is configured and available'
+      : 'GitHub sourcing requires GITHUB_TOKEN environment variable',
+  });
+});
+
+/**
+ * POST /sourcing/github/generate-keywords - Use AI to generate optimal GitHub search keywords
+ */
+router.post('/github/generate-keywords', async (req, res, next) => {
+  try {
+    const { jobTitle, jobDescription, requiredSkills, preferredSkills, intakeNotes, existingSearchStrategy } = req.body;
+
+    if (!jobTitle) {
+      return res.status(400).json({
+        error: 'Job title is required',
+      });
+    }
+
+    const input = {
+      jobTitle,
+      jobDescription,
+      requiredSkills,
+      preferredSkills,
+      intakeNotes,
+      existingSearchStrategy,
+    };
+
+    // Try AI generation, fall back to quick/basic generation if AI fails
+    let result: {
+      primaryKeywords: string[];
+      secondaryKeywords: string[];
+      suggestedLanguage: string;
+      alternativeLanguages: string[];
+      reasoning: string;
+      confidence: number;
+    };
+    try {
+      // This may throw if ANTHROPIC_API_KEY is not set
+      const generator = getAIGitHubKeywordGenerator();
+      result = await generator.generateKeywords(input);
+    } catch (aiError) {
+      console.warn('[Sourcing] AI keyword generation failed, using fallback:', aiError);
+      // Use static fallback function that doesn't require Claude client
+      result = generateGitHubKeywordsFallback(input);
+    }
+
+    res.json({
+      success: true,
+      ...result,
+    });
+  } catch (error) {
+    console.error('[Sourcing] GitHub keyword generation failed:', error);
+    next(error);
+  }
+});
+
+/**
+ * POST /sourcing/github/search - Search GitHub for developers
+ */
+router.post('/github/search', async (req, res, next) => {
+  try {
+    if (!isGitHubConfigured()) {
+      return res.status(503).json({
+        error: 'GitHub sourcing not configured',
+        message: 'Set GITHUB_TOKEN environment variable to enable GitHub sourcing',
+      });
+    }
+
+    const tenantId = getTenantIdFromRequest(req);
+    const input = githubSearchSchema.parse(req.body);
+
+    const runId = uuid();
+
+    // Create GitHub search run record
+    const run: GitHubSearchRun = {
+      id: runId,
+      tenantId,
+      requisitionId: input.requisitionId,
+      status: 'queued',
+      progress: 0,
+      totalFound: 0,
+      candidates: [],
+      query: {
+        language: input.language,
+        location: input.location,
+        followers: input.followers,
+        repos: input.repos,
+        keywords: input.keywords,
+      },
+      startedAt: new Date(),
+    };
+    githubSearchRuns.set(runId, run);
+
+    // Execute GitHub search in background
+    executeGitHubSearch(runId, input.maxResults, input.extractEmails).catch((err) => {
+      console.error(`[Sourcing] GitHub search ${runId} failed:`, err);
+      const run = githubSearchRuns.get(runId);
+      if (run) {
+        run.status = 'failed';
+        run.error = err.message;
+      }
+    });
+
+    res.json({
+      runId,
+      status: 'queued',
+      message: `GitHub search started`,
+      query: run.query,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /sourcing/github/results/:runId - Get GitHub search results
+ */
+router.get('/github/results/:runId', async (req, res, next) => {
+  try {
+    const { runId } = req.params;
+    const run = githubSearchRuns.get(runId);
+
+    if (!run) {
+      return res.status(404).json({
+        error: 'GitHub search run not found',
+      });
+    }
+
+    res.json({
+      id: run.id,
+      status: run.status,
+      progress: run.progress,
+      totalFound: run.totalFound,
+      candidates: run.candidates,
+      query: run.query,
+      error: run.error,
+      startedAt: run.startedAt,
+      completedAt: run.completedAt,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /sourcing/github/runs - List all GitHub search runs for tenant
+ */
+router.get('/github/runs', async (req, res, next) => {
+  try {
+    const tenantId = getTenantIdFromRequest(req);
+
+    const runs = Array.from(githubSearchRuns.values())
+      .filter((run) => run.tenantId === tenantId)
+      .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime())
+      .slice(0, 20);
+
+    res.json({
+      runs: runs.map((run) => ({
+        id: run.id,
+        requisitionId: run.requisitionId,
+        status: run.status,
+        totalFound: run.totalFound,
+        query: run.query,
         startedAt: run.startedAt,
         completedAt: run.completedAt,
       })),
@@ -501,6 +689,91 @@ async function executeBooleanSearch(
   } catch (error) {
     run.status = 'failed';
     run.error = error instanceof Error ? error.message : 'Unknown error';
+  }
+}
+
+// =============================================================================
+// GITHUB SEARCH EXECUTION
+// =============================================================================
+
+async function executeGitHubSearch(
+  runId: string,
+  maxResults: number,
+  extractEmails: boolean
+): Promise<void> {
+  const run = githubSearchRuns.get(runId);
+  if (!run) return;
+
+  run.status = 'running';
+  run.progress = 10;
+
+  try {
+    const client = getGitHubClient();
+    const emailExtractor = getEmailExtractor();
+
+    // Build search query
+    const searchQuery = {
+      language: run.query.language,
+      location: run.query.location,
+      followers: run.query.followers,
+      repos: run.query.repos,
+      keywords: run.query.keywords,
+    };
+
+    console.log(`[Sourcing] GitHub search ${runId} starting with query:`, searchQuery);
+
+    run.progress = 20;
+
+    // Execute search
+    const searchResults = await client.searchUsers(searchQuery);
+    run.progress = 40;
+
+    console.log(`[Sourcing] GitHub search ${runId} found ${searchResults.totalCount} users`);
+
+    // Enrich top candidates with full profile and email
+    const candidatesToEnrich = searchResults.items.slice(0, maxResults);
+    const enrichedCandidates: GitHubCandidate[] = [];
+
+    for (let i = 0; i < candidatesToEnrich.length; i++) {
+      const user = candidatesToEnrich[i];
+      run.progress = 40 + Math.round((i / candidatesToEnrich.length) * 50);
+
+      try {
+        // Get full candidate profile with email
+        const candidate = await client.enrichCandidate(user.login);
+        if (candidate) {
+          // If we should extract emails and candidate doesn't have one, try harder
+          if (extractEmails && !candidate.email) {
+            const emailResult = await emailExtractor.extractEmail(user.login);
+            if (emailResult.email) {
+              candidate.email = emailResult.email;
+              candidate.emailSource = emailResult.source;
+              candidate.emailConfidence = emailResult.confidence;
+            }
+          }
+          enrichedCandidates.push(candidate);
+        }
+      } catch (error) {
+        console.warn(`[Sourcing] Failed to enrich GitHub user ${user.login}:`, error);
+      }
+
+      // Rate limiting delay
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+
+    run.candidates = enrichedCandidates;
+    run.totalFound = enrichedCandidates.length;
+    run.status = 'completed';
+    run.progress = 100;
+    run.completedAt = new Date();
+
+    console.log(
+      `[Sourcing] GitHub search ${runId} completed with ${enrichedCandidates.length} candidates`
+    );
+  } catch (error) {
+    run.status = 'failed';
+    run.error = error instanceof Error ? error.message : 'Unknown error';
+    console.error(`[Sourcing] GitHub search ${runId} failed:`, error);
   }
 }
 

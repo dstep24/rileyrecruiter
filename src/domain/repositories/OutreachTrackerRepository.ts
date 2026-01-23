@@ -450,6 +450,138 @@ export class OutreachTrackerRepository {
       where: { id },
     });
   }
+
+  // =============================================================================
+  // EMAIL TRACKING METHODS
+  // =============================================================================
+
+  /**
+   * Find tracker by email message ID (for Resend webhook matching)
+   */
+  async findByEmailMessageId(emailMessageId: string): Promise<OutreachTracker | null> {
+    return prisma.outreachTracker.findFirst({
+      where: { emailMessageId },
+    });
+  }
+
+  /**
+   * Update email delivery status from webhook
+   */
+  async updateEmailStatus(
+    emailMessageId: string,
+    status: 'QUEUED' | 'SENT' | 'DELIVERED' | 'OPENED' | 'CLICKED' | 'BOUNCED' | 'COMPLAINED' | 'FAILED',
+    details?: {
+      openedAt?: Date;
+      clickedAt?: Date;
+      bouncedAt?: Date;
+      bounceReason?: string;
+    }
+  ): Promise<OutreachTracker | null> {
+    const tracker = await this.findByEmailMessageId(emailMessageId);
+    if (!tracker) return null;
+
+    const existingHistory = (tracker.statusHistory as unknown as StatusHistoryEntry[]) || [];
+    const statusHistory: StatusHistoryEntry[] = [
+      ...existingHistory,
+      {
+        status: tracker.status, // Keep outreach status, just log email event
+        timestamp: new Date().toISOString(),
+        details: `Email ${status.toLowerCase()}${details?.bounceReason ? `: ${details.bounceReason}` : ''}`,
+      },
+    ];
+
+    return prisma.outreachTracker.update({
+      where: { id: tracker.id },
+      data: {
+        emailStatus: status,
+        statusHistory,
+        ...(details?.openedAt && { emailOpenedAt: details.openedAt }),
+        ...(details?.clickedAt && { emailClickedAt: details.clickedAt }),
+        ...(details?.bouncedAt && { emailBouncedAt: details.bouncedAt }),
+        ...(details?.bounceReason && { emailBounceReason: details.bounceReason }),
+      },
+    });
+  }
+
+  /**
+   * Create email outreach tracker
+   */
+  async createEmailOutreach(data: CreateOutreachInput & {
+    emailAddress: string;
+    emailMessageId: string;
+    emailSubject?: string;
+  }): Promise<OutreachTracker> {
+    const statusHistory: StatusHistoryEntry[] = [
+      {
+        status: 'SENT',
+        timestamp: new Date().toISOString(),
+        details: 'Email outreach sent',
+      },
+    ];
+
+    return prisma.outreachTracker.create({
+      data: {
+        candidateProviderId: data.candidateProviderId,
+        candidateName: data.candidateName,
+        candidateProfileUrl: data.candidateProfileUrl,
+        outreachType: 'EMAIL',
+        channel: 'EMAIL',
+        messageContent: data.messageContent,
+        jobRequisitionId: data.jobRequisitionId,
+        jobTitle: data.jobTitle,
+        assessmentTemplateId: data.assessmentTemplateId,
+        sourceQueueItemId: data.sourceQueueItemId,
+        tenantId: data.tenantId || 'development',
+        status: 'SENT',
+        statusHistory,
+        sentAt: new Date(),
+        // Email-specific fields
+        emailAddress: data.emailAddress,
+        emailMessageId: data.emailMessageId,
+        emailStatus: 'SENT',
+      },
+    });
+  }
+
+  /**
+   * Get email outreach stats
+   */
+  async getEmailStats(tenantId?: string): Promise<{
+    sent: number;
+    delivered: number;
+    opened: number;
+    clicked: number;
+    bounced: number;
+    openRate: number;
+    clickRate: number;
+  }> {
+    const where = {
+      channel: 'EMAIL' as const,
+      ...(tenantId && { tenantId }),
+    };
+
+    const [sent, delivered, opened, clicked, bounced] = await Promise.all([
+      prisma.outreachTracker.count({ where: { ...where, emailStatus: 'SENT' } }),
+      prisma.outreachTracker.count({ where: { ...where, emailStatus: 'DELIVERED' } }),
+      prisma.outreachTracker.count({ where: { ...where, emailStatus: 'OPENED' } }),
+      prisma.outreachTracker.count({ where: { ...where, emailStatus: 'CLICKED' } }),
+      prisma.outreachTracker.count({ where: { ...where, emailStatus: 'BOUNCED' } }),
+    ]);
+
+    const totalDelivered = delivered + opened + clicked;
+    const openRate = totalDelivered > 0 ? ((opened + clicked) / totalDelivered) * 100 : 0;
+    const clickRate = opened + clicked > 0 ? (clicked / (opened + clicked)) * 100 : 0;
+
+    return {
+      sent,
+      delivered,
+      opened,
+      clicked,
+      bounced,
+      openRate: Math.round(openRate * 10) / 10,
+      clickRate: Math.round(clickRate * 10) / 10,
+    };
+  }
 }
 
 // Export singleton instance

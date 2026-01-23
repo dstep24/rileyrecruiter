@@ -98,7 +98,7 @@ export default function CriteriaPage() {
     setLoading(true);
     try {
       // Try real API first
-      const versionsRes = await fetch(`${API_BASE}/api/criteria/versions`, {
+      const versionsRes = await fetch(`${API_BASE}/api/demo/criteria/versions`, {
         headers: { 'X-Tenant-Id': 'demo-tenant' },
       });
 
@@ -108,7 +108,7 @@ export default function CriteriaPage() {
         setDemoMode(false);
 
         // Fetch active criteria
-        const criteriaRes = await fetch(`${API_BASE}/api/criteria`, {
+        const criteriaRes = await fetch(`${API_BASE}/api/demo/criteria`, {
           headers: { 'X-Tenant-Id': 'demo-tenant' },
         });
         if (criteriaRes.ok) {
@@ -123,8 +123,8 @@ export default function CriteriaPage() {
       setDemoMode(true);
       try {
         const [versionsRes, criteriaRes] = await Promise.all([
-          fetch(`${API_BASE}/api/criteria/versions`),
-          fetch(`${API_BASE}/api/criteria`),
+          fetch(`${API_BASE}/api/demo/criteria/versions`),
+          fetch(`${API_BASE}/api/demo/criteria`),
         ]);
 
         if (versionsRes.ok) {

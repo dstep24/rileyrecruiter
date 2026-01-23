@@ -21,6 +21,7 @@ import { v4 as uuid } from 'uuid';
 import { ClaudeClient, getClaudeClient } from '../../integrations/llm/ClaudeClient.js';
 import { getGuidelinesRepository } from '../../domain/repositories/GuidelinesRepository.js';
 import { getTaskRepository } from '../../domain/repositories/TaskRepository.js';
+import { getDomainSelector, DomainSelector } from '../../domain/services/DomainSelector.js';
 import type {
   InnerLoopConfig,
   InnerLoopContext,
@@ -38,6 +39,7 @@ import type {
 import type { TaskType } from '../../domain/entities/Task.js';
 import type { GuidelinesContent } from '../../domain/entities/Guidelines.js';
 import type { CriteriaContent } from '../../domain/entities/Criteria.js';
+import type { DomainSelectionResult, DomainConfig } from '../../domain/entities/DomainConfig.js';
 
 // =============================================================================
 // CONFIGURATION
@@ -60,16 +62,18 @@ export class InnerLoopEngine {
   private claude: ClaudeClient;
   private guidelinesRepo = getGuidelinesRepository();
   private taskRepo = getTaskRepository();
+  private domainSelector: DomainSelector;
 
-  constructor(claude?: ClaudeClient) {
+  constructor(claude?: ClaudeClient, domainSelector?: DomainSelector) {
     this.claude = claude || getClaudeClient();
+    this.domainSelector = domainSelector || getDomainSelector();
   }
 
   /**
    * Execute the inner loop for a task
    *
    * This is the core autonomous cycle:
-   * 1. Load current Guidelines and Criteria
+   * 1. Select domain and load appropriate (G, C) pair
    * 2. Generate output using Guidelines
    * 3. Evaluate output against Criteria
    * 4. If passed: return converged output
@@ -79,6 +83,36 @@ export class InnerLoopEngine {
     const runId = uuid();
     const startTime = Date.now();
     const config = { ...DEFAULT_CONFIG, ...context.config };
+
+    // 1. Select appropriate domain and (G, C) pair
+    const domainSelection = await this.domainSelector.selectDomain(
+      context.tenantId,
+      {
+        domainSlug: context.domainSlug,
+        requisition: context.input.requisition,
+        taskType: context.taskType,
+        ...context.input.domainContext,
+      }
+    );
+
+    console.log(`[InnerLoop ${runId}] Domain selection:`, {
+      domain: domainSelection.domain?.name || 'tenant-level',
+      method: domainSelection.selectionMethod,
+      guidelinesId: domainSelection.guidelinesId,
+      criteriaId: domainSelection.criteriaId,
+    });
+
+    // Apply domain-specific config overrides
+    const domainOverrides = domainSelection.domain?.configOverrides || {};
+    if (domainOverrides.convergenceThreshold) {
+      config.convergenceThreshold = domainOverrides.convergenceThreshold;
+    }
+    if (domainOverrides.maxIterations) {
+      config.maxIterations = domainOverrides.maxIterations;
+    }
+    if (domainOverrides.evaluationDimensions) {
+      config.evaluationDimensions = domainOverrides.evaluationDimensions;
+    }
 
     // Initialize run state
     const run: InnerLoopRun = {
@@ -95,11 +129,14 @@ export class InnerLoopEngine {
       guidelinesUpdates: [],
       startedAt: new Date(),
       createdAt: new Date(),
+      domainId: domainSelection.domain?.id,
+      domainName: domainSelection.domain?.name,
+      selectionMethod: domainSelection.selectionMethod,
     };
 
-    // Load Guidelines and Criteria
-    let guidelines = await this.loadGuidelines(context.tenantId);
-    const criteria = await this.loadCriteria(context.tenantId);
+    // Load Guidelines and Criteria using domain selection
+    let guidelines = await this.domainSelector.loadGuidelines(domainSelection);
+    const criteria = await this.domainSelector.loadCriteria(domainSelection);
 
     let iteration = 0;
     let lastOutput: GeneratedOutput | undefined;

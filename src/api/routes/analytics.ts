@@ -63,49 +63,38 @@ router.get('/', async (req: Request, res: Response) => {
       }),
     ]);
 
-    // Get candidate counts by stage
-    const [
-      sourcedCandidates,
-      contactedCandidates,
-      respondedCandidates,
-      screenedCandidates,
-      interviewedCandidates,
-    ] = await Promise.all([
-      prisma.candidate.count({
-        where: {
-          tenantId,
-          createdAt: { gte: startDate },
-        },
-      }),
-      prisma.candidate.count({
-        where: {
-          tenantId,
-          stage: { in: ['CONTACTED', 'RESPONDED', 'SCREENING', 'INTERVIEW_SCHEDULED', 'INTERVIEWING', 'OFFER_EXTENDED', 'OFFER_ACCEPTED', 'HIRED'] },
-          createdAt: { gte: startDate },
-        },
-      }),
-      prisma.candidate.count({
-        where: {
-          tenantId,
-          stage: { in: ['RESPONDED', 'SCREENING', 'INTERVIEW_SCHEDULED', 'INTERVIEWING', 'OFFER_EXTENDED', 'OFFER_ACCEPTED', 'HIRED'] },
-          createdAt: { gte: startDate },
-        },
-      }),
-      prisma.candidate.count({
-        where: {
-          tenantId,
-          stage: { in: ['SCREENING', 'INTERVIEW_SCHEDULED', 'INTERVIEWING', 'OFFER_EXTENDED', 'OFFER_ACCEPTED', 'HIRED'] },
-          createdAt: { gte: startDate },
-        },
-      }),
-      prisma.candidate.count({
-        where: {
-          tenantId,
-          stage: { in: ['INTERVIEW_SCHEDULED', 'INTERVIEWING', 'OFFER_EXTENDED', 'OFFER_ACCEPTED', 'HIRED'] },
-          createdAt: { gte: startDate },
-        },
-      }),
-    ]);
+    // Get candidate counts by stage (exclusive counts - each candidate counted only in their current stage)
+    const candidateStageGroups = await prisma.candidate.groupBy({
+      by: ['stage'],
+      _count: true,
+      where: {
+        tenantId,
+        createdAt: { gte: startDate },
+      },
+    });
+
+    // Build a map of stage counts
+    const stageCounts: Record<string, number> = {};
+    candidateStageGroups.forEach(group => {
+      stageCounts[group.stage] = group._count;
+    });
+
+    // Calculate exclusive counts for each funnel stage
+    const sourcedCandidates = Object.values(stageCounts).reduce((sum, count) => sum + count, 0);
+    const contactedCandidates = (stageCounts['CONTACTED'] || 0);
+    const respondedCandidates = (stageCounts['RESPONDED'] || 0);
+    const screenedCandidates = (stageCounts['SCREENING'] || 0);
+    const interviewedCandidates = (stageCounts['INTERVIEW_SCHEDULED'] || 0) +
+                                  (stageCounts['INTERVIEWING'] || 0);
+    const offeredCandidates = (stageCounts['OFFER_EXTENDED'] || 0) +
+                              (stageCounts['OFFER_ACCEPTED'] || 0);
+    const hiredCandidates = (stageCounts['HIRED'] || 0);
+
+    // Calculate cumulative funnel metrics (how many reached at least this stage)
+    const reachedContacted = sourcedCandidates - (stageCounts['SOURCED'] || 0) - (stageCounts['REJECTED'] || 0);
+    const reachedResponded = reachedContacted - contactedCandidates - (stageCounts['NOT_INTERESTED'] || 0) - (stageCounts['NO_RESPONSE'] || 0);
+    const reachedScreening = reachedResponded - respondedCandidates;
+    const reachedInterview = reachedScreening - screenedCandidates;
 
     // Get outreach tracker stats
     const [
@@ -172,6 +161,43 @@ router.get('/', async (req: Request, res: Response) => {
       avgApprovalTime = totalTime / approvedTasksWithTime.length / 60000; // Convert to minutes
     }
 
+    // Calculate average time to response from outreach trackers
+    // This measures time between outreach sent and candidate reply
+    const repliedOutreachWithTimes = await prisma.outreachTracker.findMany({
+      where: {
+        tenantId,
+        status: 'REPLIED',
+        sentAt: { not: null },
+        createdAt: { gte: startDate },
+      },
+      select: {
+        sentAt: true,
+        updatedAt: true, // updatedAt is when status changed to REPLIED
+      },
+    });
+
+    let avgTimeToResponse = 0;
+    if (repliedOutreachWithTimes.length > 0) {
+      const totalResponseTime = repliedOutreachWithTimes.reduce((sum, outreach) => {
+        if (outreach.sentAt) {
+          // Calculate hours between send and reply
+          return sum + (outreach.updatedAt.getTime() - outreach.sentAt.getTime());
+        }
+        return sum;
+      }, 0);
+      // Convert to hours
+      avgTimeToResponse = totalResponseTime / repliedOutreachWithTimes.length / (1000 * 60 * 60);
+    }
+
+    // Get total escalations count for escalation rate
+    const totalEscalations = await prisma.task.count({
+      where: {
+        tenantId,
+        escalationReason: { not: null },
+        createdAt: { gte: startDate },
+      },
+    });
+
     // Get weekly trends (last 7 days)
     const weeklyTrends = await getWeeklyTrends(tenantId);
 
@@ -214,20 +240,61 @@ router.get('/', async (req: Request, res: Response) => {
       },
     });
 
-    // Get template performance
-    const templateStats = await prisma.outreachTemplate.findMany({
+    // Get template performance with calculated response rates
+    const templates = await prisma.outreachTemplate.findMany({
       where: {
         tenantId,
         useCount: { gt: 0 },
       },
-      orderBy: { responseRate: 'desc' },
-      take: 5,
       select: {
+        id: true,
         name: true,
         useCount: true,
         responseRate: true,
       },
     });
+
+    // Calculate actual response rates from outreach tracker data
+    const templateStatsWithCalculatedRates = await Promise.all(
+      templates.map(async (template) => {
+        // Count outreach using this template
+        const outreachWithTemplate = await prisma.outreachTracker.count({
+          where: {
+            tenantId,
+            assessmentTemplateId: template.id,
+            createdAt: { gte: startDate },
+          },
+        });
+
+        // Count replies for outreach using this template
+        const repliesWithTemplate = await prisma.outreachTracker.count({
+          where: {
+            tenantId,
+            assessmentTemplateId: template.id,
+            status: 'REPLIED',
+            createdAt: { gte: startDate },
+          },
+        });
+
+        // Calculate actual response rate
+        const calculatedRate = outreachWithTemplate > 0
+          ? repliesWithTemplate / outreachWithTemplate
+          : template.responseRate || 0;
+
+        return {
+          name: template.name,
+          uses: template.useCount,
+          responseRate: calculatedRate,
+          periodUses: outreachWithTemplate,
+          periodReplies: repliesWithTemplate,
+        };
+      })
+    );
+
+    // Sort by response rate and take top 5
+    const templateStats = templateStatsWithCalculatedRates
+      .sort((a, b) => b.responseRate - a.responseRate)
+      .slice(0, 5);
 
     return res.json({
       success: true,
@@ -240,11 +307,25 @@ router.get('/', async (req: Request, res: Response) => {
           pending: pendingTasks,
         },
         candidates: {
+          // Total and exclusive stage counts
           sourced: sourcedCandidates,
           contacted: contactedCandidates,
           responded: respondedCandidates,
           screened: screenedCandidates,
           interviewed: interviewedCandidates,
+          offered: offeredCandidates,
+          hired: hiredCandidates,
+          // Full breakdown by stage
+          byStage: stageCounts,
+          // Conversion rates (what % moved to next stage)
+          conversionRates: {
+            sourcedToContacted: sourcedCandidates > 0 ? reachedContacted / sourcedCandidates : 0,
+            contactedToResponded: reachedContacted > 0 ? reachedResponded / reachedContacted : 0,
+            respondedToScreened: reachedResponded > 0 ? reachedScreening / reachedResponded : 0,
+            screenedToInterview: reachedScreening > 0 ? reachedInterview / reachedScreening : 0,
+            interviewToOffer: interviewedCandidates > 0 ? offeredCandidates / interviewedCandidates : 0,
+            offerToHired: offeredCandidates > 0 ? hiredCandidates / offeredCandidates : 0,
+          },
         },
         outreach: {
           total: totalOutreach,
@@ -255,7 +336,8 @@ router.get('/', async (req: Request, res: Response) => {
           responseRate,
           approvalRate,
           avgApprovalTime, // in minutes
-          avgTimeToResponse: 48, // TODO: Calculate from actual response times
+          avgTimeToResponse, // in hours (calculated from actual response times)
+          escalationRate: totalTasks > 0 ? totalEscalations / totalTasks : 0,
         },
         trends: weeklyTrends,
         conversationsByStage: conversationStats.reduce((acc, item) => {

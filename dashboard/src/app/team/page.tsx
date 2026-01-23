@@ -24,7 +24,7 @@ export default function TeamPage() {
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const response = await fetch(`${API_BASE}/api/team`);
+      const response = await fetch(`${API_BASE}/api/demo/team`);
 
       if (response.ok) {
         const data = await response.json();

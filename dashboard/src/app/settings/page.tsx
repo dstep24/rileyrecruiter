@@ -30,6 +30,7 @@ interface Settings {
     email: { connected: boolean; provider: string };
     calendar: { connected: boolean; provider: string };
     linkedin: { connected: boolean; provider?: string; lastSync?: string };
+    github: { connected: boolean; provider?: string; lastSync?: string };
   };
 }
 
@@ -40,7 +41,7 @@ interface SettingsSection {
 }
 
 interface IntegrationConfig {
-  key: 'ats' | 'email' | 'calendar' | 'linkedin';
+  key: 'ats' | 'email' | 'calendar' | 'linkedin' | 'github';
   name: string;
   description: string;
   providers: { id: string; name: string; requiresApiKey?: boolean; requiresOAuth?: boolean }[];
@@ -121,6 +122,17 @@ const integrationConfigs: IntegrationConfig[] = [
       { id: 'apiKey', label: 'API Key', type: 'password', placeholder: 'Enter your Unipile API key' },
       { id: 'dsn', label: 'DSN (Subdomain or URL)', type: 'text', placeholder: 'e.g., api12 or api12.unipile.com:14273' },
       { id: 'accountId', label: 'Account ID', type: 'text', placeholder: 'LinkedIn account ID from Unipile dashboard' },
+    ],
+  },
+  {
+    key: 'github',
+    name: 'GitHub',
+    description: 'Source developers from GitHub and extract contact emails',
+    providers: [
+      { id: 'github', name: 'GitHub API (Personal Access Token)', requiresApiKey: true },
+    ],
+    fields: [
+      { id: 'token', label: 'Personal Access Token', type: 'password', placeholder: 'ghp_xxxxxxxxxxxxxxxxxxxx' },
     ],
   },
 ];
@@ -355,6 +367,35 @@ export default function SettingsPage() {
       // Ignore parse errors
     }
   }, [settings?.integrations?.linkedin?.connected]);
+
+  // Check for saved GitHub config on load
+  useEffect(() => {
+    try {
+      const savedConfig = localStorage.getItem('riley_github_config');
+      if (savedConfig && settings) {
+        const parsed = JSON.parse(savedConfig);
+        if (parsed.token) {
+          // Mark GitHub as connected if we have saved config
+          setSettings((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  integrations: {
+                    ...prev.integrations,
+                    github: {
+                      connected: true,
+                      provider: 'github',
+                    },
+                  },
+                }
+              : prev
+          );
+        }
+      }
+    } catch {
+      // Ignore parse errors
+    }
+  }, [settings?.integrations?.github?.connected]);
 
   // Parse DSN input - extract just the subdomain if user pasted full URL
   const parseDsn = (input: string): { subdomain: string; port: string } => {
@@ -616,7 +657,7 @@ export default function SettingsPage() {
 
           try {
             // Test by calling our scoring endpoint
-            const response = await fetch(`${API_BASE}/api/ai/score-candidates`, {
+            const response = await fetch(`${API_BASE}/api/demo/ai/score-candidates`, {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
@@ -1016,6 +1057,7 @@ export default function SettingsPage() {
           email: { bg: 'bg-blue-100', text: 'text-blue-600', label: '@' },
           calendar: { bg: 'bg-purple-100', text: 'text-purple-600', label: 'Cal' },
           linkedin: { bg: 'bg-blue-700', text: 'text-white', label: 'in' },
+          github: { bg: 'bg-gray-900', text: 'text-white', label: 'GH' },
         };
 
         const openIntegrationModal = (config: IntegrationConfig) => {
@@ -1042,13 +1084,33 @@ export default function SettingsPage() {
             }
           }
 
+          // Load saved GitHub config if exists
+          if (config.key === 'github') {
+            try {
+              const savedConfig = localStorage.getItem('riley_github_config');
+              if (savedConfig) {
+                const parsed = JSON.parse(savedConfig);
+                setIntegrationFields({
+                  token: parsed.token || '',
+                });
+                setSelectedProvider('github');
+                return;
+              }
+            } catch {
+              // Ignore parse errors
+            }
+          }
+
           setIntegrationFields({});
         };
 
-        const handleDisconnect = (key: 'ats' | 'email' | 'calendar' | 'linkedin') => {
+        const handleDisconnect = (key: 'ats' | 'email' | 'calendar' | 'linkedin' | 'github') => {
           // Clear saved config
           if (key === 'linkedin') {
             localStorage.removeItem('riley_unipile_config');
+          }
+          if (key === 'github') {
+            localStorage.removeItem('riley_github_config');
           }
 
           setSettings({
@@ -1906,9 +1968,106 @@ export default function SettingsPage() {
                 </button>
               )}
 
-              {/* For non-Unipile providers */}
+              {/* For GitHub provider */}
+              {selectedProvider === 'github' && (
+                <button
+                  onClick={async () => {
+                    const token = integrationFields.token;
+                    if (!token) {
+                      setConnectionTestResult({
+                        success: false,
+                        message: 'Please enter your GitHub Personal Access Token',
+                      });
+                      return;
+                    }
+
+                    if (!token.startsWith('ghp_') && !token.startsWith('github_pat_')) {
+                      setConnectionTestResult({
+                        success: false,
+                        message: 'Invalid token format. GitHub tokens start with "ghp_" or "github_pat_"',
+                      });
+                      return;
+                    }
+
+                    setConnecting(true);
+                    setConnectionTestResult(null);
+
+                    try {
+                      // Test the token by fetching the authenticated user
+                      const response = await fetch('https://api.github.com/user', {
+                        headers: {
+                          Authorization: `Bearer ${token}`,
+                          Accept: 'application/vnd.github+json',
+                        },
+                      });
+
+                      if (response.ok) {
+                        const user = await response.json();
+
+                        // Save to localStorage
+                        const githubConfig = {
+                          token,
+                          username: user.login,
+                          name: user.name,
+                          connectedAt: new Date().toISOString(),
+                        };
+                        localStorage.setItem('riley_github_config', JSON.stringify(githubConfig));
+
+                        // Update settings state
+                        setSettings({
+                          ...settings,
+                          integrations: {
+                            ...settings.integrations,
+                            github: {
+                              connected: true,
+                              provider: 'github',
+                              lastSync: new Date().toISOString(),
+                            },
+                          },
+                        });
+
+                        setConnectionTestResult({
+                          success: true,
+                          message: `Connected as ${user.login} (${user.name || 'No name'})`,
+                        });
+
+                        // Close modal after brief delay to show success
+                        setTimeout(() => {
+                          setIntegrationModal(null);
+                          setConnectionTestResult(null);
+                        }, 1500);
+                      } else if (response.status === 401) {
+                        setConnectionTestResult({
+                          success: false,
+                          message: 'Invalid token. Please check your GitHub Personal Access Token.',
+                        });
+                      } else {
+                        setConnectionTestResult({
+                          success: false,
+                          message: `GitHub API error: ${response.status}`,
+                        });
+                      }
+                    } catch (error) {
+                      setConnectionTestResult({
+                        success: false,
+                        message: `Connection failed: ${error instanceof Error ? error.message : 'Network error'}`,
+                      });
+                    } finally {
+                      setConnecting(false);
+                    }
+                  }}
+                  disabled={connecting || !integrationFields.token}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 flex items-center gap-2"
+                >
+                  {connecting && <RefreshCw className="h-4 w-4 animate-spin" />}
+                  {connecting ? 'Validating...' : 'Connect'}
+                </button>
+              )}
+
+              {/* For non-Unipile, non-GitHub providers */}
               {selectedProvider &&
                 selectedProvider !== 'unipile' &&
+                selectedProvider !== 'github' &&
                 !integrationModal.providers.find((p) => p.id === selectedProvider)?.requiresOAuth && (
                   <button
                     onClick={() => {

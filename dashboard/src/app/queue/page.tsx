@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useSearchParams } from 'next/navigation';
 import {
   Check,
   X,
@@ -131,6 +132,7 @@ const statusLabels: Record<string, string> = {
 type OutreachFlow = 'connection' | 'direct';
 
 export default function QueuePage() {
+  const searchParams = useSearchParams();
   const [queue, setQueue] = useState<QueuedCandidate[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
@@ -141,20 +143,23 @@ export default function QueuePage() {
   const [editingDraft, setEditingDraft] = useState<string | null>(null);
   const [draftText, setDraftText] = useState<string>('');
   const [generatingAI, setGeneratingAI] = useState<Set<string>>(new Set());
-  const [hasAiKey, setHasAiKey] = useState<boolean | null>(null);
   const [fetchingAssessment, setFetchingAssessment] = useState<Set<string>>(new Set());
   const [copiedAssessmentLink, setCopiedAssessmentLink] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [assessmentTemplates, setAssessmentTemplates] = useState<AssessmentTemplate[]>([]);
   const [linkingAssessment, setLinkingAssessment] = useState<string | null>(null); // candidate id being linked
   const [sendingPitch, setSendingPitch] = useState<Set<string>>(new Set()); // tracking pitch sends
-  const [activeFlow, setActiveFlow] = useState<OutreachFlow>('connection'); // which tab is active
 
-  // Load Unipile config, AI key status, and queue from localStorage on mount
+  // Initialize activeFlow from URL params, default to 'connection'
+  const initialFlow = searchParams.get('flow') as OutreachFlow | null;
+  const [activeFlow, setActiveFlow] = useState<OutreachFlow>(
+    initialFlow === 'direct' ? 'direct' : 'connection'
+  );
+
+  // Load Unipile config and queue from localStorage on mount
   useEffect(() => {
     loadUnipileConfig();
     loadQueue();
-    checkAiKey();
     fetchAssessmentTemplates();
   }, []);
 
@@ -193,11 +198,6 @@ export default function QueuePage() {
     );
     saveQueue(updatedQueue);
     setLinkingAssessment(null);
-  };
-
-  const checkAiKey = () => {
-    const key = localStorage.getItem('riley_anthropic_api_key');
-    setHasAiKey(!!key);
   };
 
   const loadUnipileConfig = () => {
@@ -468,7 +468,7 @@ Best regards`;
       // Get the Anthropic API key from localStorage
       const apiKey = localStorage.getItem('riley_anthropic_api_key');
 
-      const response = await fetch(`${API_BASE}/api/ai/generate-outreach`, {
+      const response = await fetch(`${API_BASE}/api/demo/ai/generate-outreach`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

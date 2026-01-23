@@ -30,6 +30,11 @@ import {
   MessageSquareText,
   Globe,
   Briefcase,
+  Github,
+  Mail,
+  Star,
+  GitFork,
+  Code,
 } from 'lucide-react';
 import { CandidateScoreCard, BatchScoringSummaryCard, type CandidateScore } from '../../components/CandidateScoreCard';
 import { SourcingScoreCard, BatchSourcingSummaryCard, type SourcingScore } from '../../components/SourcingScoreCard';
@@ -45,6 +50,63 @@ interface UnipileConfig {
   port: string;
   accountId: string;
 }
+
+// GitHub config from localStorage
+interface GitHubConfig {
+  token: string;
+  username: string;
+  name?: string;
+  connectedAt: string;
+}
+
+// GitHub candidate from search
+interface GitHubCandidate {
+  id: string;
+  username: string;
+  name: string | null;
+  bio: string | null;
+  location: string | null;
+  company: string | null;
+  blog: string | null;
+  email: string | null;
+  emailSource: 'profile' | 'commits' | null;
+  emailConfidence: 'high' | 'medium' | 'low';
+  followers: number;
+  publicRepos: number;
+  topLanguages: string[];
+  totalStars: number;
+  avatarUrl: string;
+  htmlUrl: string;
+  hireable: boolean | null;
+  createdAt: string;
+  // Extracted from repo names and descriptions for keyword matching
+  repoKeywords: string;
+}
+
+// GitHub-specific 4-pillar scoring for candidate match quality
+interface GitHubCandidateScore {
+  overall: number; // 0-100 weighted average
+  technicalFit: {
+    score: number; // 0-100
+    reasons: string[]; // e.g., "Go (required language)", "45 public repos"
+  };
+  senioritySignals: {
+    score: number;
+    reasons: string[]; // e.g., "1,200 followers (senior-level)", "Account age: 8 years"
+  };
+  keywordMatch: {
+    score: number;
+    matchedKeywords: string[]; // Keywords found in bio/company
+    totalKeywords: number; // Total keywords searched
+  };
+  contactQuality: {
+    score: number;
+    reasons: string[]; // e.g., "Email available (high confidence)", "Marked as hireable"
+  };
+}
+
+// Search source type
+type SearchSource = 'linkedin' | 'github';
 
 // Unipile search result types
 interface UnipileSearchProfile {
@@ -289,6 +351,25 @@ export default function SourcingPage() {
   const [editableBooleanQuery, setEditableBooleanQuery] = useState('');
   const [isBooleanQueryValid, setIsBooleanQueryValid] = useState(true);
 
+  // Search Source State (LinkedIn vs GitHub)
+  const [searchSource, setSearchSource] = useState<SearchSource>('linkedin');
+  const [githubConfig, setGithubConfig] = useState<GitHubConfig | null>(null);
+  const [githubSearchParams, setGithubSearchParams] = useState({
+    language: '',
+    location: '',
+    keywords: '',
+    minFollowers: '',
+    minRepos: '',
+  });
+  const [githubCandidates, setGithubCandidates] = useState<GitHubCandidate[]>([]);
+  const [isSearchingGithub, setIsSearchingGithub] = useState(false);
+  const [githubSearchError, setGithubSearchError] = useState<string | null>(null);
+  const [extractingEmails, setExtractingEmails] = useState<Set<string>>(new Set());
+  const [isGeneratingGithubKeywords, setIsGeneratingGithubKeywords] = useState(false);
+  const [githubKeywordSource, setGithubKeywordSource] = useState<'basic' | 'ai'>('basic');
+  const [expandedGithubCandidates, setExpandedGithubCandidates] = useState<Set<string>>(new Set());
+  const [githubCandidateScores, setGithubCandidateScores] = useState<Map<string, GitHubCandidateScore>>(new Map());
+
   // Company Research State
   const [autoResearchEnabled, setAutoResearchEnabled] = useState(false);
   const [researchingCompanies, setResearchingCompanies] = useState<Set<string>>(new Set());
@@ -375,6 +456,826 @@ export default function SourcingPage() {
       // Ignore parse errors
     }
   }, []);
+
+  // Load GitHub config from localStorage on mount
+  useEffect(() => {
+    try {
+      const savedConfig = localStorage.getItem('riley_github_config');
+      if (savedConfig) {
+        const parsed = JSON.parse(savedConfig);
+        if (parsed.token) {
+          setGithubConfig(parsed);
+        }
+      }
+    } catch {
+      // Ignore parse errors
+    }
+  }, []);
+
+  // Auto-populate GitHub search params from parsed JD criteria
+  // Use a ref to track which JD we've already populated for
+  const lastPopulatedJDRef = useRef<string>('');
+
+  // Generate AI-powered GitHub keywords
+  const generateAIGithubKeywords = async () => {
+    if (!customJD.title) return;
+
+    setIsGeneratingGithubKeywords(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/sourcing/github/generate-keywords`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jobTitle: customJD.title,
+          jobDescription: customJD.description,
+          requiredSkills: parsedCriteria?.requiredSkills || customJD.skills.split(',').map(s => s.trim()).filter(Boolean),
+          preferredSkills: parsedCriteria?.preferredSkills,
+          intakeNotes: customJD.intakeNotes,
+          existingSearchStrategy: searchStrategy ? {
+            mustHaveSkills: searchStrategy.mustHaveSkills,
+            niceToHaveSkills: searchStrategy.niceToHaveSkills,
+            seniorityLevel: searchStrategy.seniorityLevel,
+          } : undefined,
+        }),
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        console.log('[GitHub AI Keywords] Generated:', result);
+
+        // Combine primary and secondary keywords (primary first)
+        const allKeywords = [
+          ...result.primaryKeywords,
+          ...result.secondaryKeywords,
+        ].slice(0, 10); // Limit to 10 keywords
+
+        // Get location from JD
+        let location = '';
+        if (!customJD.isFullyRemote) {
+          const rawLocation = parsedCriteria?.locations?.[0] || customJD.location || '';
+          if (rawLocation && !rawLocation.toLowerCase().match(/^(remote|hybrid|anywhere|global|worldwide)/)) {
+            location = rawLocation;
+          }
+        }
+
+        // Set minimum followers/repos based on seniority
+        let minFollowers = '';
+        let minRepos = '';
+        if (searchStrategy?.seniorityLevel) {
+          const level = searchStrategy.seniorityLevel.toLowerCase();
+          if (level.includes('senior') || level.includes('staff') || level.includes('principal')) {
+            minFollowers = '50';
+            minRepos = '10';
+          } else if (level.includes('mid') || level.includes('ii') || level.includes('iii')) {
+            minFollowers = '20';
+            minRepos = '5';
+          }
+        }
+
+        setGithubSearchParams({
+          language: result.suggestedLanguage || '',
+          location: location,
+          keywords: allKeywords.join(' '),
+          minFollowers: minFollowers,
+          minRepos: minRepos,
+        });
+        setGithubKeywordSource('ai');
+      } else {
+        console.error('[GitHub AI Keywords] Failed to generate, falling back to basic');
+        // Fall back to basic keyword generation
+        generateBasicGithubKeywords();
+      }
+    } catch (error) {
+      console.error('[GitHub AI Keywords] Error:', error);
+      // Fall back to basic keyword generation
+      generateBasicGithubKeywords();
+    } finally {
+      setIsGeneratingGithubKeywords(false);
+    }
+  };
+
+  // Basic keyword generation (fallback when AI is unavailable)
+  const generateBasicGithubKeywords = () => {
+    // Detect if this is an infrastructure/platform role
+    const detectInfraRole = (title: string, skills: string[]): boolean => {
+      const allText = `${title} ${skills.join(' ')}`.toLowerCase();
+      const infraPatterns = [
+        /\bplatform\s+engineer/,
+        /\bdevops/,
+        /\bsre\b/,
+        /\bsite\s+reliability/,
+        /\binfrastructure\s+engineer/,
+        /\bcloud\s+engineer/,
+        /\bcloud\s+architect/,
+        /\bsystems?\s+engineer/,
+        /\bdevsecops/,
+        /\bterraform/,
+        /\bbicep/,
+        /\bazure\s+platform/,
+        /\baws\s+platform/,
+        /\bgcp\s+platform/,
+        /\blanding\s+zones?/,
+      ];
+      return infraPatterns.some(pattern => pattern.test(allText));
+    };
+
+    const allSkillsRaw = [
+      ...(searchStrategy?.mustHaveSkills || []),
+      ...(parsedCriteria?.requiredSkills || []),
+    ];
+    const isInfraRole = detectInfraRole(customJD.title || '', allSkillsRaw);
+
+    // Map common programming skills to GitHub languages
+    // For infra roles, terraform -> hcl, not python
+    const languageMap: Record<string, string> = {
+      // Core languages
+      'typescript': 'typescript',
+      'javascript': 'javascript',
+      'python': 'python',
+      'java': 'java',
+      'go': 'go',
+      'golang': 'go',
+      'rust': 'rust',
+      'c++': 'cpp',
+      'c#': 'csharp',
+      'ruby': 'ruby',
+      'php': 'php',
+      'swift': 'swift',
+      'kotlin': 'kotlin',
+      'scala': 'scala',
+      // Frontend frameworks
+      'react': 'typescript',
+      'reactjs': 'typescript',
+      'react.js': 'typescript',
+      'node': 'javascript',
+      'nodejs': 'javascript',
+      'node.js': 'javascript',
+      'vue': 'javascript',
+      'vuejs': 'javascript',
+      'angular': 'typescript',
+      // Backend frameworks
+      'django': 'python',
+      'flask': 'python',
+      'fastapi': 'python',
+      'rails': 'ruby',
+      'spring': 'java',
+      'springboot': 'java',
+      '.net': 'csharp',
+      'dotnet': 'csharp',
+      // DevOps/Infrastructure - different mapping for infra roles
+      'terraform': isInfraRole ? 'hcl' : 'python',
+      'bicep': 'bicep',
+      'ansible': 'python',
+      'kubernetes': 'go',
+      'k8s': 'go',
+      'docker': isInfraRole ? 'shell' : 'python',
+      'aws': isInfraRole ? 'shell' : 'python',
+      'azure': isInfraRole ? 'powershell' : 'python',
+      'gcp': isInfraRole ? 'shell' : 'python',
+      'devops': isInfraRole ? 'shell' : 'python',
+      'sre': 'go',
+      'platform engineer': isInfraRole ? 'hcl' : 'go',
+      'infrastructure': isInfraRole ? 'hcl' : 'python',
+      'pulumi': 'typescript',
+      'cloudformation': 'python',
+      'bash': 'shell',
+      'shell': 'shell',
+      'powershell': 'powershell',
+      'ci/cd': 'shell',
+      'jenkins': 'python',
+      'azure devops': 'shell',
+      'arm templates': 'json',
+      'landing zones': 'hcl',
+    };
+
+    // Find the most prevalent programming language from the full JD context
+    // Combine all text sources: skills, description, title
+    const allSkills = [
+      ...(searchStrategy?.mustHaveSkills || []),
+      ...(parsedCriteria?.requiredSkills || []),
+      ...(parsedCriteria?.preferredSkills || []),
+    ].map(s => s.toLowerCase().trim());
+
+    // Build full text to search for language mentions
+    const fullText = [
+      customJD.title || '',
+      customJD.description || '',
+      ...allSkills,
+    ].join(' ').toLowerCase();
+
+    // Count occurrences of each language/framework in the full text
+    const languageCounts: Record<string, number> = {};
+    for (const [term, lang] of Object.entries(languageMap)) {
+      // Use word boundary regex to avoid partial matches
+      const regex = new RegExp(`\\b${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi');
+      const matches = fullText.match(regex);
+      if (matches) {
+        // Boost weight for infra languages when in infra role
+        const weight = isInfraRole && ['hcl', 'shell', 'powershell', 'bicep'].includes(lang) ? 2 : 1;
+        languageCounts[lang] = (languageCounts[lang] || 0) + (matches.length * weight);
+      }
+    }
+
+    // Also check skills list for exact matches (higher weight)
+    for (const skill of allSkills) {
+      const mapped = languageMap[skill];
+      if (mapped) {
+        languageCounts[mapped] = (languageCounts[mapped] || 0) + 3; // Weight skills higher
+      }
+    }
+
+    // Find the most prevalent language (default to hcl for infra, python otherwise)
+    let detectedLanguage = isInfraRole ? 'hcl' : '';
+    let maxCount = 0;
+    for (const [lang, count] of Object.entries(languageCounts)) {
+      if (count > maxCount) {
+        maxCount = count;
+        detectedLanguage = lang;
+      }
+    }
+
+    // If no language detected, try to infer from job title keywords
+    if (!detectedLanguage && customJD.title) {
+      const titleLower = customJD.title.toLowerCase();
+      // Title mappings - infra-aware
+      const titleMappings: Record<string, string> = {
+        'platform engineer': isInfraRole ? 'hcl' : 'go',
+        'devops': isInfraRole ? 'shell' : 'python',
+        'sre': 'go',
+        'site reliability': 'go',
+        'infrastructure': isInfraRole ? 'hcl' : 'python',
+        'cloud engineer': isInfraRole ? 'hcl' : 'python',
+        'cloud architect': isInfraRole ? 'hcl' : 'python',
+        'azure': isInfraRole ? 'powershell' : 'python',
+        'aws': isInfraRole ? 'shell' : 'python',
+        'data engineer': 'python',
+        'ml engineer': 'python',
+        'machine learning': 'python',
+        'backend': 'go',
+        'frontend': 'typescript',
+        'fullstack': 'typescript',
+        'full stack': 'typescript',
+        'mobile': 'kotlin',
+        'ios': 'swift',
+        'android': 'kotlin',
+      };
+      for (const [keyword, lang] of Object.entries(titleMappings)) {
+        if (titleLower.includes(keyword)) {
+          detectedLanguage = lang;
+          break;
+        }
+      }
+    }
+
+    console.log('[GitHub Basic Keywords] Language detection:', { isInfraRole, languageCounts, detectedLanguage });
+
+    // Build keywords - for basic mode, use skills + infra-specific keywords if applicable
+    let technicalSkills = (searchStrategy?.mustHaveSkills || parsedCriteria?.requiredSkills || [])
+      .filter(s => {
+        const lower = s.toLowerCase().trim();
+        return !languageMap[lower] &&
+               s.length < 20 &&
+               !['software', 'engineering', 'development', 'programming', 'senior', 'junior', 'engineer', 'developer'].includes(lower);
+      })
+      .slice(0, isInfraRole ? 5 : 2); // More keywords for infra roles since they're harder to find
+
+    // For infra roles, add common infra keywords if not already present
+    if (isInfraRole) {
+      const infraKeywords = ['terraform', 'kubernetes', 'azure', 'aws', 'devops', 'infrastructure', 'iac', 'ci/cd'];
+      for (const kw of infraKeywords) {
+        if (!technicalSkills.map(s => s.toLowerCase()).includes(kw) && technicalSkills.length < 8) {
+          technicalSkills.push(kw);
+        }
+      }
+    }
+
+    // Get location from JD
+    let location = '';
+    if (!customJD.isFullyRemote) {
+      const rawLocation = parsedCriteria?.locations?.[0] || customJD.location || '';
+      if (rawLocation && !rawLocation.toLowerCase().match(/^(remote|hybrid|anywhere|global|worldwide)/)) {
+        location = rawLocation;
+      }
+    }
+
+    // Set minimum followers/repos based on seniority
+    let minFollowers = '';
+    let minRepos = '';
+    if (searchStrategy?.seniorityLevel) {
+      const level = searchStrategy.seniorityLevel.toLowerCase();
+      if (level.includes('senior') || level.includes('staff') || level.includes('principal')) {
+        minFollowers = '50';
+        minRepos = '10';
+      } else if (level.includes('mid') || level.includes('ii') || level.includes('iii')) {
+        minFollowers = '20';
+        minRepos = '5';
+      }
+    }
+
+    setGithubSearchParams({
+      language: detectedLanguage,
+      location: location,
+      keywords: technicalSkills.join(' '),
+      minFollowers: minFollowers,
+      minRepos: minRepos,
+    });
+    setGithubKeywordSource('basic');
+  };
+
+  // Score a GitHub candidate against search criteria using 4 pillars
+  const scoreGitHubCandidate = (
+    candidate: GitHubCandidate,
+    searchKeywords: string[],
+    requiredLanguage?: string
+  ): GitHubCandidateScore => {
+    // 1. TECHNICAL FIT (30%) - Languages, repos, stars
+    const technicalReasons: string[] = [];
+    let technicalScore = 0;
+
+    // Language match
+    if (requiredLanguage && candidate.topLanguages.length > 0) {
+      const langLower = requiredLanguage.toLowerCase();
+      const hasLanguage = candidate.topLanguages.some(l => l.toLowerCase() === langLower);
+      if (hasLanguage) {
+        technicalScore += 40;
+        technicalReasons.push(`${requiredLanguage} (required language)`);
+      } else {
+        technicalReasons.push(`Missing ${requiredLanguage} in top languages`);
+      }
+    } else if (candidate.topLanguages.length > 0) {
+      technicalScore += 20; // Has some languages
+      technicalReasons.push(`Languages: ${candidate.topLanguages.slice(0, 3).join(', ')}`);
+    }
+
+    // Repo count
+    if (candidate.publicRepos >= 50) {
+      technicalScore += 30;
+      technicalReasons.push(`${candidate.publicRepos} public repos (prolific)`);
+    } else if (candidate.publicRepos >= 20) {
+      technicalScore += 20;
+      technicalReasons.push(`${candidate.publicRepos} public repos (active)`);
+    } else if (candidate.publicRepos >= 5) {
+      technicalScore += 10;
+      technicalReasons.push(`${candidate.publicRepos} public repos`);
+    }
+
+    // Total stars
+    if (candidate.totalStars >= 500) {
+      technicalScore += 30;
+      technicalReasons.push(`${candidate.totalStars.toLocaleString()} total stars (high quality)`);
+    } else if (candidate.totalStars >= 100) {
+      technicalScore += 20;
+      technicalReasons.push(`${candidate.totalStars.toLocaleString()} total stars (good quality)`);
+    } else if (candidate.totalStars >= 10) {
+      technicalScore += 10;
+      technicalReasons.push(`${candidate.totalStars.toLocaleString()} total stars`);
+    }
+
+    // 2. SENIORITY SIGNALS (25%) - Followers, account age, stars
+    const seniorityReasons: string[] = [];
+    let seniorityScore = 0;
+
+    // Followers
+    if (candidate.followers >= 1000) {
+      seniorityScore += 40;
+      seniorityReasons.push(`${candidate.followers.toLocaleString()} followers (senior-level indicator)`);
+    } else if (candidate.followers >= 200) {
+      seniorityScore += 30;
+      seniorityReasons.push(`${candidate.followers.toLocaleString()} followers (mid-level indicator)`);
+    } else if (candidate.followers >= 50) {
+      seniorityScore += 20;
+      seniorityReasons.push(`${candidate.followers.toLocaleString()} followers`);
+    } else if (candidate.followers >= 10) {
+      seniorityScore += 10;
+      seniorityReasons.push(`${candidate.followers} followers`);
+    }
+
+    // Account age
+    const accountAge = new Date().getFullYear() - new Date(candidate.createdAt).getFullYear();
+    if (accountAge >= 8) {
+      seniorityScore += 30;
+      seniorityReasons.push(`Account age: ${accountAge} years (veteran)`);
+    } else if (accountAge >= 5) {
+      seniorityScore += 25;
+      seniorityReasons.push(`Account age: ${accountAge} years (experienced)`);
+    } else if (accountAge >= 3) {
+      seniorityScore += 15;
+      seniorityReasons.push(`Account age: ${accountAge} years`);
+    } else {
+      seniorityReasons.push(`Account age: ${accountAge} year(s) (newer account)`);
+    }
+
+    // Star accumulation as seniority signal
+    if (candidate.totalStars >= 100 && candidate.publicRepos >= 10) {
+      seniorityScore += 30;
+      seniorityReasons.push('Consistent contribution history');
+    }
+
+    // 3. KEYWORD MATCH (25%) - Search bio, company, languages, and repo names/descriptions
+    const matchedKeywords: string[] = [];
+    const searchText = `${candidate.bio || ''} ${candidate.company || ''} ${candidate.name || ''} ${candidate.topLanguages.join(' ')} ${candidate.repoKeywords || ''}`.toLowerCase();
+
+    for (const keyword of searchKeywords) {
+      if (keyword && searchText.includes(keyword.toLowerCase())) {
+        matchedKeywords.push(keyword);
+      }
+    }
+
+    const keywordScore = searchKeywords.length > 0
+      ? Math.round((matchedKeywords.length / searchKeywords.length) * 100)
+      : 50; // Default if no keywords
+
+    // 4. CONTACT QUALITY (20%) - Email, hireable status, portfolio
+    const contactReasons: string[] = [];
+    let contactScore = 0;
+
+    // Email
+    if (candidate.email) {
+      if (candidate.emailConfidence === 'high') {
+        contactScore += 50;
+        contactReasons.push('Email available (high confidence)');
+      } else if (candidate.emailConfidence === 'medium') {
+        contactScore += 35;
+        contactReasons.push('Email available (medium confidence)');
+      } else {
+        contactScore += 20;
+        contactReasons.push('Email available (low confidence)');
+      }
+    } else {
+      contactReasons.push('No email available');
+    }
+
+    // Hireable
+    if (candidate.hireable === true) {
+      contactScore += 30;
+      contactReasons.push('Marked as hireable');
+    }
+
+    // Portfolio/blog
+    if (candidate.blog) {
+      contactScore += 20;
+      contactReasons.push('Has portfolio/blog URL');
+    } else {
+      contactReasons.push('No portfolio/blog URL');
+    }
+
+    // Calculate overall weighted score
+    const overall = Math.round(
+      technicalScore * 0.30 +
+      seniorityScore * 0.25 +
+      keywordScore * 0.25 +
+      contactScore * 0.20
+    );
+
+    return {
+      overall,
+      technicalFit: { score: Math.min(100, technicalScore), reasons: technicalReasons },
+      senioritySignals: { score: Math.min(100, seniorityScore), reasons: seniorityReasons },
+      keywordMatch: { score: keywordScore, matchedKeywords, totalKeywords: searchKeywords.length },
+      contactQuality: { score: Math.min(100, contactScore), reasons: contactReasons },
+    };
+  };
+
+  // Auto-populate GitHub search params when JD is parsed - use AI if available
+  useEffect(() => {
+    if (!parsedCriteria && !searchStrategy) return;
+
+    // Determine the effective location (accounting for remote roles)
+    const effectiveLocation = customJD.isFullyRemote ? '' : (parsedCriteria?.locations?.[0] || customJD.location || '');
+
+    // Create a key to identify this JD (so we don't re-populate for the same JD)
+    // Include location in the key so location changes trigger re-population
+    const jdKey = `${customJD.title}-${parsedCriteria?.titles?.[0] || ''}-${parsedCriteria?.requiredSkills?.join(',') || ''}-${effectiveLocation}-${customJD.isFullyRemote}`;
+
+    // If we've already populated for this JD, don't do it again
+    if (lastPopulatedJDRef.current === jdKey) return;
+    lastPopulatedJDRef.current = jdKey;
+
+    console.log('[GitHub Auto-populate] Populating from JD:', {
+      title: customJD.title,
+      parsedTitles: parsedCriteria?.titles,
+      requiredSkills: parsedCriteria?.requiredSkills,
+      mustHaveSkills: searchStrategy?.mustHaveSkills,
+      location: effectiveLocation,
+      isFullyRemote: customJD.isFullyRemote,
+    });
+
+    // Try AI keyword generation first, fall back to basic
+    generateAIGithubKeywords();
+  }, [parsedCriteria, searchStrategy, customJD.title, customJD.location, customJD.isFullyRemote]);
+
+  // GitHub search function - calls GitHub API directly from frontend
+  const searchGitHub = async () => {
+    if (!githubConfig) {
+      setGithubSearchError('GitHub is not connected. Please connect in Settings first.');
+      return;
+    }
+
+    setIsSearchingGithub(true);
+    setGithubSearchError(null);
+    setGithubCandidates([]);
+
+    try {
+      // Build GitHub search query
+      // Note: GitHub user search API is limited - it only searches username, email, and full name
+      // It does NOT search bios. Language searches users with repos in that language.
+      const queryParts: string[] = [];
+      queryParts.push('type:user');
+
+      if (githubSearchParams.language) {
+        queryParts.push(`language:${githubSearchParams.language}`);
+      }
+      if (githubSearchParams.location) {
+        // Skip "Remote" and similar non-geographic locations
+        const loc = githubSearchParams.location.toLowerCase();
+        if (!loc.match(/^(remote|hybrid|anywhere|global|worldwide)/)) {
+          queryParts.push(`location:"${githubSearchParams.location}"`);
+        }
+      }
+      // Note: We don't add keywords to the query since GitHub user search doesn't search bios
+      // Keywords will be used for filtering results after fetching profiles
+      if (githubSearchParams.minFollowers) {
+        queryParts.push(`followers:>=${githubSearchParams.minFollowers}`);
+      }
+      if (githubSearchParams.minRepos) {
+        queryParts.push(`repos:>=${githubSearchParams.minRepos}`);
+      }
+
+      const query = queryParts.join(' ');
+      console.log('[GitHub Search] Query:', query);
+      console.log('[GitHub Search] Keywords for filtering:', githubSearchParams.keywords || 'none');
+
+      // Search users via GitHub API
+      const searchResponse = await fetch(
+        `https://api.github.com/search/users?q=${encodeURIComponent(query)}&per_page=30&sort=followers&order=desc`,
+        {
+          headers: {
+            'Authorization': `Bearer ${githubConfig.token}`,
+            'Accept': 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28',
+          },
+        }
+      );
+
+      if (!searchResponse.ok) {
+        const errorData = await searchResponse.json().catch(() => ({}));
+        throw new Error(errorData.message || `GitHub API error: ${searchResponse.status}`);
+      }
+
+      const searchData = await searchResponse.json();
+      console.log('[GitHub Search] Found', searchData.total_count, 'users, fetching', searchData.items?.length || 0, 'profiles');
+
+      // Fetch detailed profiles for each user (with rate limiting)
+      const enrichedCandidates: GitHubCandidate[] = [];
+
+      for (const user of searchData.items || []) {
+        try {
+          // Get detailed profile
+          const profileResponse = await fetch(
+            `https://api.github.com/users/${user.login}`,
+            {
+              headers: {
+                'Authorization': `Bearer ${githubConfig.token}`,
+                'Accept': 'application/vnd.github+json',
+                'X-GitHub-Api-Version': '2022-11-28',
+              },
+            }
+          );
+
+          if (!profileResponse.ok) continue;
+
+          const profile = await profileResponse.json();
+
+          // Get repos to calculate stars and languages
+          const reposResponse = await fetch(
+            `https://api.github.com/users/${user.login}/repos?per_page=100&sort=pushed`,
+            {
+              headers: {
+                'Authorization': `Bearer ${githubConfig.token}`,
+                'Accept': 'application/vnd.github+json',
+                'X-GitHub-Api-Version': '2022-11-28',
+              },
+            }
+          );
+
+          let totalStars = 0;
+          const languageCounts: Record<string, number> = {};
+          const repoTexts: string[] = [];
+
+          if (reposResponse.ok) {
+            const repos = await reposResponse.json();
+            for (const repo of repos) {
+              totalStars += repo.stargazers_count || 0;
+              if (repo.language) {
+                languageCounts[repo.language] = (languageCounts[repo.language] || 0) + 1;
+              }
+              // Extract repo name and description for keyword matching
+              // Repo names often contain tech keywords like "terraform-aws-vpc", "k8s-operator"
+              if (repo.name) {
+                // Convert repo-name-format to space-separated words
+                repoTexts.push(repo.name.replace(/[-_]/g, ' '));
+              }
+              if (repo.description) {
+                repoTexts.push(repo.description);
+              }
+              // Also capture topics if available (very keyword-rich)
+              if (repo.topics && Array.isArray(repo.topics)) {
+                repoTexts.push(repo.topics.join(' '));
+              }
+            }
+          }
+
+          // Get top languages
+          const topLanguages = Object.entries(languageCounts)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 5)
+            .map(([lang]) => lang);
+
+          // Combine all repo text for keyword matching
+          const repoKeywords = repoTexts.join(' ');
+
+          enrichedCandidates.push({
+            id: String(profile.id),
+            username: profile.login,
+            name: profile.name,
+            bio: profile.bio,
+            location: profile.location,
+            company: profile.company,
+            blog: profile.blog,
+            email: profile.email,
+            emailSource: profile.email ? 'profile' : null,
+            emailConfidence: profile.email ? 'high' : 'low',
+            followers: profile.followers || 0,
+            publicRepos: profile.public_repos || 0,
+            topLanguages,
+            totalStars,
+            avatarUrl: profile.avatar_url,
+            htmlUrl: profile.html_url,
+            hireable: profile.hireable,
+            createdAt: profile.created_at,
+            repoKeywords,
+          });
+
+          // Small delay between API calls to respect rate limits
+          await new Promise(resolve => setTimeout(resolve, 100));
+        } catch (err) {
+          console.warn(`[GitHub Search] Failed to fetch profile for ${user.login}:`, err);
+        }
+      }
+
+      // Score and sort by keyword relevance (instead of filtering out non-matches)
+      // This way we still show all developers but prioritize those with relevant keywords
+      let scoredCandidates = enrichedCandidates;
+      if (githubSearchParams.keywords) {
+        const keywords = githubSearchParams.keywords.toLowerCase().split(/\s+/).filter(k => k.length > 2);
+        if (keywords.length > 0) {
+          // Calculate keyword match score for each candidate
+          scoredCandidates = enrichedCandidates.map(candidate => {
+            const searchText = [
+              candidate.bio || '',
+              candidate.company || '',
+              candidate.topLanguages.join(' '),
+              candidate.name || '',
+              candidate.username || '',
+              candidate.repoKeywords || '', // Include repo names and descriptions
+            ].join(' ').toLowerCase();
+
+            // Count how many keywords match
+            const matchCount = keywords.filter(keyword => searchText.includes(keyword)).length;
+            const matchScore = matchCount / keywords.length; // 0 to 1
+
+            return { ...candidate, keywordMatchScore: matchScore };
+          });
+
+          // Sort by keyword match score (highest first), then by followers
+          scoredCandidates.sort((a, b) => {
+            const scoreA = (a as { keywordMatchScore?: number }).keywordMatchScore || 0;
+            const scoreB = (b as { keywordMatchScore?: number }).keywordMatchScore || 0;
+            if (scoreB !== scoreA) return scoreB - scoreA;
+            return (b.followers || 0) - (a.followers || 0);
+          });
+
+          const matchedCount = scoredCandidates.filter(c => (c as { keywordMatchScore?: number }).keywordMatchScore && (c as { keywordMatchScore?: number }).keywordMatchScore! > 0).length;
+          console.log('[GitHub Search] Keyword relevance scoring:', keywords, '- matched', matchedCount, 'of', enrichedCandidates.length, 'candidates');
+        }
+      }
+
+      setGithubCandidates(scoredCandidates);
+      console.log('[GitHub Search] Enriched', scoredCandidates.length, 'candidates (sorted by keyword relevance)');
+
+      // Log to Riley activity
+      logActivity('GitHub Search', `Searched GitHub for "${query}" - found ${scoredCandidates.length} developers (${scoredCandidates.filter(c => c.email).length} with emails)`);
+
+    } catch (error) {
+      console.error('[GitHub Search] Error:', error);
+      setGithubSearchError(error instanceof Error ? error.message : 'Failed to search GitHub');
+    } finally {
+      setIsSearchingGithub(false);
+    }
+  };
+
+  // Extract email for a GitHub user from their commit history
+  const extractEmailForCandidate = async (username: string) => {
+    if (!githubConfig) return;
+
+    setExtractingEmails(prev => new Set(prev).add(username));
+
+    try {
+      // Get user's repos
+      const reposResponse = await fetch(
+        `https://api.github.com/users/${username}/repos?per_page=10&sort=pushed`,
+        {
+          headers: {
+            'Authorization': `Bearer ${githubConfig.token}`,
+            'Accept': 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28',
+          },
+        }
+      );
+
+      if (!reposResponse.ok) {
+        throw new Error('Failed to fetch repos');
+      }
+
+      const repos = await reposResponse.json();
+      const emailCounts: Record<string, number> = {};
+
+      // Check commits in each repo
+      for (const repo of repos.slice(0, 5)) {
+        try {
+          const commitsResponse = await fetch(
+            `https://api.github.com/repos/${repo.full_name}/commits?author=${username}&per_page=50`,
+            {
+              headers: {
+                'Authorization': `Bearer ${githubConfig.token}`,
+                'Accept': 'application/vnd.github+json',
+                'X-GitHub-Api-Version': '2022-11-28',
+              },
+            }
+          );
+
+          if (commitsResponse.ok) {
+            const commits = await commitsResponse.json();
+            for (const commit of commits) {
+              const email = commit.commit?.author?.email;
+              if (email && !isNoreplyEmail(email)) {
+                emailCounts[email] = (emailCounts[email] || 0) + 1;
+              }
+            }
+          }
+
+          // Small delay between requests
+          await new Promise(resolve => setTimeout(resolve, 100));
+        } catch {
+          // Continue with other repos
+        }
+      }
+
+      // Find the most used email
+      const sortedEmails = Object.entries(emailCounts)
+        .sort((a, b) => b[1] - a[1]);
+
+      if (sortedEmails.length > 0) {
+        const [email, count] = sortedEmails[0];
+        const confidence = count > 10 ? 'medium' : 'low';
+
+        // Update the candidate with the extracted email
+        setGithubCandidates(prev =>
+          prev.map(c =>
+            c.username === username
+              ? { ...c, email, emailSource: 'commits' as const, emailConfidence: confidence }
+              : c
+          )
+        );
+
+        console.log(`[GitHub Email] Extracted email for ${username}: ${email} (${count} commits, ${confidence} confidence)`);
+      } else {
+        console.log(`[GitHub Email] No email found for ${username}`);
+      }
+
+    } catch (error) {
+      console.error(`[GitHub Email] Error extracting email for ${username}:`, error);
+    } finally {
+      setExtractingEmails(prev => {
+        const next = new Set(prev);
+        next.delete(username);
+        return next;
+      });
+    }
+  };
+
+  // Helper to check if email is a noreply address
+  const isNoreplyEmail = (email: string): boolean => {
+    const lower = email.toLowerCase();
+    return (
+      lower.includes('noreply') ||
+      lower.includes('no-reply') ||
+      lower.endsWith('@users.noreply.github.com') ||
+      lower.endsWith('@github.com') ||
+      lower.includes('invalid') ||
+      lower.includes('example.com')
+    );
+  };
 
   // Sync editableBooleanQuery when parsedCriteria changes
   useEffect(() => {
@@ -705,7 +1606,7 @@ export default function SourcingPage() {
         });
       });
       console.log(`[AI Scoring] === END DETAILED DATA ===`);
-      console.log(`[AI Scoring] Sending request to ${API_BASE}/api/ai/sourcing-score with ${candidatePayload.length} candidates`);
+      console.log(`[AI Scoring] Sending request to ${API_BASE}/api/demo/ai/sourcing-score with ${candidatePayload.length} candidates`);
       console.log(`[AI Scoring] API key present: ${!!apiKey}`);
 
       // Add timeout to prevent infinite hanging (3 minutes should be enough for ~25 candidates)
@@ -716,7 +1617,7 @@ export default function SourcingPage() {
       }, 180000);
 
       try {
-        const response = await fetch(`${API_BASE}/api/ai/sourcing-score`, {
+        const response = await fetch(`${API_BASE}/api/demo/ai/sourcing-score`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -833,12 +1734,12 @@ export default function SourcingPage() {
 
     console.log(`[Enrich] Fetching full profile for ${candidate.name} (${candidate.providerId})`);
     console.log(`[Enrich] API_BASE: ${API_BASE}`);
-    console.log(`[Enrich] Full URL: ${API_BASE}/api/profile/enrich`);
+    console.log(`[Enrich] Full URL: ${API_BASE}/api/demo/profile/enrich`);
     console.log(`[Enrich] unipileConfig present:`, !!unipileConfig);
 
     try {
       console.log(`[Enrich] Sending fetch request...`);
-      const response = await fetch(`${API_BASE}/api/profile/enrich`, {
+      const response = await fetch(`${API_BASE}/api/demo/profile/enrich`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1012,7 +1913,7 @@ export default function SourcingPage() {
 
     try {
       console.log(`[Research] Calling API for company: "${companyName}"`);
-      const response = await fetch(`${API_BASE}/api/company/research`, {
+      const response = await fetch(`${API_BASE}/api/demo/company/research`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1049,7 +1950,7 @@ export default function SourcingPage() {
         const apiKey = localStorage.getItem('riley_anthropic_api_key');
         console.log('[Research] Re-scoring candidate with enriched data...');
 
-        const scoreResponse = await fetch(`${API_BASE}/api/ai/sourcing-score`, {
+        const scoreResponse = await fetch(`${API_BASE}/api/demo/ai/sourcing-score`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -1195,7 +2096,7 @@ export default function SourcingPage() {
 
   const fetchRequisitions = async () => {
     try {
-      const response = await fetch(`${API_BASE}/api/requisitions`);
+      const response = await fetch(`${API_BASE}/api/demo/requisitions`);
       if (response.ok) {
         const data = await response.json();
         setRequisitions(data);
@@ -1583,7 +2484,7 @@ export default function SourcingPage() {
       const apiKey = localStorage.getItem('riley_anthropic_api_key');
 
       // Call AI endpoint to generate intelligent search strategy
-      const response = await fetch(`${API_BASE}/api/ai/generate-search-strategy`, {
+      const response = await fetch(`${API_BASE}/api/demo/ai/generate-search-strategy`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -2420,14 +3321,18 @@ export default function SourcingPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">LinkedIn Sourcing</h1>
-          <p className="text-gray-600">Search for candidates based on job descriptions</p>
+          <h1 className="text-2xl font-bold text-gray-900">Candidate Sourcing</h1>
+          <p className="text-gray-600">Search for candidates on LinkedIn or GitHub</p>
         </div>
         <div className="flex items-center gap-3">
           {/* Clear Search Button */}
-          {(customJD.title || customJD.description || parsedCriteria || searchRun) && (
+          {(customJD.title || customJD.description || parsedCriteria || searchRun || githubCandidates.length > 0) && (
             <button
-              onClick={clearSearch}
+              onClick={() => {
+                clearSearch();
+                setGithubCandidates([]);
+                setGithubSearchError(null);
+              }}
               className="flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-md transition-colors"
               title="Clear all search configuration and results"
             >
@@ -2435,21 +3340,66 @@ export default function SourcingPage() {
               Clear Search
             </button>
           )}
-          {unipileConfig ? (
-            <span className="flex items-center gap-1 px-2 py-1 text-xs font-medium bg-blue-100 text-blue-800 rounded-full">
-              <Linkedin className="h-3 w-3" />
-              LinkedIn Recruiter Connected
-            </span>
-          ) : (
-            <a
-              href="/settings"
-              className="flex items-center gap-1 px-2 py-1 text-xs font-medium bg-yellow-100 text-yellow-800 rounded-full hover:bg-yellow-200 transition-colors"
-            >
-              <WifiOff className="h-3 w-3" />
-              Connect LinkedIn in Settings
-            </a>
+          {/* Connection Status Badges */}
+          {searchSource === 'linkedin' && (
+            unipileConfig ? (
+              <span className="flex items-center gap-1 px-2 py-1 text-xs font-medium bg-blue-100 text-blue-800 rounded-full">
+                <Linkedin className="h-3 w-3" />
+                LinkedIn Connected
+              </span>
+            ) : (
+              <a
+                href="/settings"
+                className="flex items-center gap-1 px-2 py-1 text-xs font-medium bg-yellow-100 text-yellow-800 rounded-full hover:bg-yellow-200 transition-colors"
+              >
+                <WifiOff className="h-3 w-3" />
+                Connect LinkedIn in Settings
+              </a>
+            )
+          )}
+          {searchSource === 'github' && (
+            githubConfig ? (
+              <span className="flex items-center gap-1 px-2 py-1 text-xs font-medium bg-gray-800 text-white rounded-full">
+                <Github className="h-3 w-3" />
+                GitHub Connected ({githubConfig.username})
+              </span>
+            ) : (
+              <a
+                href="/settings"
+                className="flex items-center gap-1 px-2 py-1 text-xs font-medium bg-yellow-100 text-yellow-800 rounded-full hover:bg-yellow-200 transition-colors"
+              >
+                <WifiOff className="h-3 w-3" />
+                Connect GitHub in Settings
+              </a>
+            )
           )}
         </div>
+      </div>
+
+      {/* Source Tabs */}
+      <div className="flex gap-2 border-b border-gray-200">
+        <button
+          onClick={() => setSearchSource('linkedin')}
+          className={`flex items-center gap-2 px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            searchSource === 'linkedin'
+              ? 'border-blue-600 text-blue-600'
+              : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+          }`}
+        >
+          <Linkedin className="h-4 w-4" />
+          LinkedIn
+        </button>
+        <button
+          onClick={() => setSearchSource('github')}
+          className={`flex items-center gap-2 px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            searchSource === 'github'
+              ? 'border-gray-900 text-gray-900'
+              : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+          }`}
+        >
+          <Github className="h-4 w-4" />
+          GitHub
+        </button>
       </div>
 
       {/* API Warning Alert */}
@@ -2469,8 +3419,8 @@ export default function SourcingPage() {
         </div>
       )}
 
-      {/* Search Error Alert */}
-      {searchError && (
+      {/* Search Error Alert (LinkedIn) */}
+      {searchSource === 'linkedin' && searchError && (
         <div className="bg-red-50 border border-red-200 rounded-lg p-4 flex items-start gap-3">
           <AlertCircle className="h-5 w-5 text-red-600 flex-shrink-0 mt-0.5" />
           <div>
@@ -2486,6 +3436,516 @@ export default function SourcingPage() {
         </div>
       )}
 
+      {/* GitHub Search Error Alert */}
+      {searchSource === 'github' && githubSearchError && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4 flex items-start gap-3">
+          <AlertCircle className="h-5 w-5 text-red-600 flex-shrink-0 mt-0.5" />
+          <div>
+            <h3 className="font-medium text-red-800">GitHub Search Failed</h3>
+            <p className="text-sm text-red-700 mt-1">{githubSearchError}</p>
+            <button
+              onClick={() => setGithubSearchError(null)}
+              className="text-sm text-red-600 hover:text-red-800 mt-2 underline"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================ */}
+      {/* GITHUB SOURCING UI */}
+      {/* ============================================================ */}
+      {searchSource === 'github' && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Left Panel - GitHub Search Configuration */}
+          <div className="lg:col-span-1 space-y-4">
+            <div className="bg-white rounded-lg border border-gray-200 p-4">
+              <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                <Github className="h-5 w-5" />
+                GitHub Search
+              </h2>
+
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Programming Language
+                  </label>
+                  <select
+                    value={githubSearchParams.language}
+                    onChange={(e) => setGithubSearchParams({ ...githubSearchParams, language: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-gray-500"
+                  >
+                    <option value="">Any Language</option>
+                    <option value="typescript">TypeScript</option>
+                    <option value="javascript">JavaScript</option>
+                    <option value="python">Python</option>
+                    <option value="go">Go</option>
+                    <option value="rust">Rust</option>
+                    <option value="java">Java</option>
+                    <option value="kotlin">Kotlin</option>
+                    <option value="swift">Swift</option>
+                    <option value="ruby">Ruby</option>
+                    <option value="php">PHP</option>
+                    <option value="c++">C++</option>
+                    <option value="c#">C#</option>
+                    <option value="scala">Scala</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Location
+                  </label>
+                  <input
+                    type="text"
+                    value={githubSearchParams.location}
+                    onChange={(e) => setGithubSearchParams({ ...githubSearchParams, location: e.target.value })}
+                    placeholder="e.g., San Francisco, New York, Remote"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-gray-500"
+                  />
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-sm font-medium text-gray-700">
+                      Keywords (bio search)
+                    </label>
+                    <div className="flex items-center gap-2">
+                      {githubKeywordSource === 'ai' && (
+                        <span className="text-xs text-purple-600 flex items-center gap-1">
+                          <Brain className="h-3 w-3" />
+                          AI Generated
+                        </span>
+                      )}
+                      <button
+                        onClick={generateAIGithubKeywords}
+                        disabled={isGeneratingGithubKeywords || !customJD.title}
+                        className="text-xs text-purple-600 hover:text-purple-800 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+                        title="Generate keywords using Riley's AI"
+                      >
+                        {isGeneratingGithubKeywords ? (
+                          <>
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                            Generating...
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles className="h-3 w-3" />
+                            AI Generate
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                  <input
+                    type="text"
+                    value={githubSearchParams.keywords}
+                    onChange={(e) => {
+                      setGithubSearchParams({ ...githubSearchParams, keywords: e.target.value });
+                      setGithubKeywordSource('basic'); // Mark as manually edited
+                    }}
+                    placeholder="e.g., kubernetes helm argocd istio terraform"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-gray-500"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    {githubKeywordSource === 'ai'
+                      ? 'AI-selected keywords optimized for developer bios'
+                      : 'Enter terms developers put in their GitHub bios'}
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Min Followers
+                    </label>
+                    <input
+                      type="number"
+                      value={githubSearchParams.minFollowers}
+                      onChange={(e) => setGithubSearchParams({ ...githubSearchParams, minFollowers: e.target.value })}
+                      placeholder="e.g., 50"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-gray-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Min Repos
+                    </label>
+                    <input
+                      type="number"
+                      value={githubSearchParams.minRepos}
+                      onChange={(e) => setGithubSearchParams({ ...githubSearchParams, minRepos: e.target.value })}
+                      placeholder="e.g., 10"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-gray-500"
+                    />
+                  </div>
+                </div>
+
+                <button
+                  onClick={searchGitHub}
+                  disabled={isSearchingGithub || !githubConfig}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-gray-900 text-white rounded-lg hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  {isSearchingGithub ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Searching GitHub...
+                    </>
+                  ) : (
+                    <>
+                      <Search className="h-4 w-4" />
+                      Search GitHub
+                    </>
+                  )}
+                </button>
+
+                {!githubConfig && (
+                  <p className="text-sm text-yellow-600 text-center">
+                    Connect GitHub in Settings to search
+                  </p>
+                )}
+              </div>
+            </div>
+
+            {/* GitHub Search Tips */}
+            <div className="bg-gray-50 rounded-lg border border-gray-200 p-4">
+              <h3 className="font-medium text-gray-900 mb-2 flex items-center gap-2">
+                <Sparkles className="h-4 w-4 text-yellow-500" />
+                GitHub Sourcing Tips
+              </h3>
+              <ul className="text-sm text-gray-600 space-y-1">
+                <li>• Language filter finds users with repos in that language</li>
+                <li>• ~30-40% of profiles have public emails</li>
+                <li>• ~70% have emails extractable from commits</li>
+                <li>• High follower count often indicates seniority</li>
+                <li>• Check hireable status for open candidates</li>
+              </ul>
+            </div>
+          </div>
+
+          {/* Right Panel - GitHub Results */}
+          <div className="lg:col-span-2 space-y-4">
+            {githubCandidates.length > 0 ? (
+              <>
+                <div className="bg-white rounded-lg border border-gray-200 p-4">
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="font-semibold text-gray-900">
+                      {githubCandidates.length} Developers Found
+                    </h2>
+                    <span className="text-sm text-gray-500">
+                      {githubCandidates.filter(c => c.email).length} with emails
+                    </span>
+                  </div>
+
+                  <div className="space-y-3">
+                    {githubCandidates.map((candidate) => {
+                      // Calculate score for this candidate - parse keywords (space or comma separated)
+                      const allKeywords = githubSearchParams.keywords
+                        ? githubSearchParams.keywords.split(/[,\s]+/).map(k => k.trim()).filter(k => k.length > 0)
+                        : [];
+                      const score = githubCandidateScores.get(candidate.username) ||
+                        scoreGitHubCandidate(candidate, allKeywords, githubSearchParams.language);
+                      const isExpanded = expandedGithubCandidates.has(candidate.username);
+
+                      return (
+                        <div
+                          key={candidate.id}
+                          className="border border-gray-200 rounded-lg hover:border-gray-300 transition-colors"
+                        >
+                          <div className="p-4">
+                            <div className="flex items-start gap-4">
+                              <img
+                                src={candidate.avatarUrl}
+                                alt={candidate.name || candidate.username}
+                                className="w-12 h-12 rounded-full"
+                              />
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <a
+                                    href={candidate.htmlUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="font-medium text-gray-900 hover:text-blue-600 flex items-center gap-1"
+                                  >
+                                    {candidate.name || candidate.username}
+                                    <ExternalLink className="h-3 w-3" />
+                                  </a>
+                                  <span className="text-sm text-gray-500">@{candidate.username}</span>
+                                  {candidate.hireable && (
+                                    <span className="px-2 py-0.5 text-xs font-medium bg-green-100 text-green-800 rounded-full">
+                                      Hireable
+                                    </span>
+                                  )}
+                                  {/* Overall Match Score Badge */}
+                                  <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${
+                                    score.overall >= 70 ? 'bg-green-100 text-green-800' :
+                                    score.overall >= 50 ? 'bg-yellow-100 text-yellow-800' :
+                                    'bg-gray-100 text-gray-800'
+                                  }`}>
+                                    {score.overall}/100 match
+                                  </span>
+                                  {/* Chevron Toggle */}
+                                  <button
+                                    onClick={() => {
+                                      setExpandedGithubCandidates(prev => {
+                                        const next = new Set(prev);
+                                        if (next.has(candidate.username)) {
+                                          next.delete(candidate.username);
+                                        } else {
+                                          next.add(candidate.username);
+                                          // Cache the score when expanded
+                                          if (!githubCandidateScores.has(candidate.username)) {
+                                            setGithubCandidateScores(prev => new Map(prev).set(candidate.username, score));
+                                          }
+                                        }
+                                        return next;
+                                      });
+                                    }}
+                                    className="ml-auto p-1 hover:bg-gray-100 rounded transition-colors"
+                                    title={isExpanded ? 'Collapse details' : 'Expand details'}
+                                  >
+                                    {isExpanded ? (
+                                      <ChevronUp className="h-4 w-4 text-gray-500" />
+                                    ) : (
+                                      <ChevronDown className="h-4 w-4 text-gray-500" />
+                                    )}
+                                  </button>
+                                </div>
+                                {candidate.bio && (
+                                  <p className="text-sm text-gray-600 mt-1 line-clamp-2">{candidate.bio}</p>
+                                )}
+                                <div className="flex flex-wrap items-center gap-3 mt-2 text-sm text-gray-500">
+                                  {candidate.location && (
+                                    <span className="flex items-center gap-1">
+                                      <MapPin className="h-3 w-3" />
+                                      {candidate.location}
+                                    </span>
+                                  )}
+                                  {candidate.company && (
+                                    <span className="flex items-center gap-1">
+                                      <Building className="h-3 w-3" />
+                                      {candidate.company}
+                                    </span>
+                                  )}
+                                  <span className="flex items-center gap-1">
+                                    <User className="h-3 w-3" />
+                                    {candidate.followers} followers
+                                  </span>
+                                  <span className="flex items-center gap-1">
+                                    <GitFork className="h-3 w-3" />
+                                    {candidate.publicRepos} repos
+                                  </span>
+                                  <span className="flex items-center gap-1">
+                                    <Star className="h-3 w-3" />
+                                    {candidate.totalStars} stars
+                                  </span>
+                                </div>
+                                {candidate.topLanguages.length > 0 && (
+                                  <div className="flex flex-wrap gap-1 mt-2">
+                                    {candidate.topLanguages.slice(0, 5).map((lang) => (
+                                      <span
+                                        key={lang}
+                                        className="px-2 py-0.5 text-xs font-medium bg-blue-50 text-blue-700 rounded"
+                                      >
+                                        {lang}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                              <div className="flex flex-col items-end gap-2">
+                                {candidate.email ? (
+                                  <div className="flex items-center gap-2">
+                                    <span className={`px-2 py-1 text-xs font-medium rounded ${
+                                      candidate.emailConfidence === 'high' ? 'bg-green-100 text-green-800' :
+                                      candidate.emailConfidence === 'medium' ? 'bg-yellow-100 text-yellow-800' :
+                                      'bg-gray-100 text-gray-800'
+                                    }`}>
+                                      {candidate.emailConfidence} confidence
+                                    </span>
+                                    <a
+                                      href={`mailto:${candidate.email}`}
+                                      className="flex items-center gap-1 px-3 py-1.5 text-sm font-medium bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
+                                    >
+                                      <Mail className="h-3 w-3" />
+                                      {candidate.email}
+                                    </a>
+                                  </div>
+                                ) : (
+                                  <button
+                                    onClick={() => extractEmailForCandidate(candidate.username)}
+                                    disabled={extractingEmails.has(candidate.username)}
+                                    className="flex items-center gap-1 px-3 py-1.5 text-sm font-medium bg-gray-100 text-gray-700 rounded hover:bg-gray-200 disabled:opacity-50 transition-colors"
+                                  >
+                                    {extractingEmails.has(candidate.username) ? (
+                                      <>
+                                        <Loader2 className="h-3 w-3 animate-spin" />
+                                        Extracting...
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Mail className="h-3 w-3" />
+                                        Extract Email
+                                      </>
+                                    )}
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Expandable Score Details Section */}
+                          {isExpanded && (
+                            <div className="border-t border-gray-200 bg-gray-50 p-4">
+                              <div className="text-sm font-medium text-gray-700 mb-3">
+                                Match Breakdown
+                              </div>
+                              <div className="space-y-3">
+                                {/* Technical Fit */}
+                                <div>
+                                  <div className="flex items-center justify-between text-sm mb-1">
+                                    <span className="font-medium text-gray-700">Technical Fit</span>
+                                    <span className="text-gray-500">{score.technicalFit.score}%</span>
+                                  </div>
+                                  <div className="w-full bg-gray-200 rounded-full h-2">
+                                    <div
+                                      className={`h-2 rounded-full ${
+                                        score.technicalFit.score >= 70 ? 'bg-green-500' :
+                                        score.technicalFit.score >= 40 ? 'bg-yellow-500' : 'bg-red-400'
+                                      }`}
+                                      style={{ width: `${score.technicalFit.score}%` }}
+                                    />
+                                  </div>
+                                  <div className="mt-1 text-xs text-gray-500">
+                                    {score.technicalFit.reasons.map((reason, i) => (
+                                      <div key={i} className="flex items-start gap-1">
+                                        {reason.startsWith('Missing') ? (
+                                          <XCircle className="h-3 w-3 text-red-400 mt-0.5 flex-shrink-0" />
+                                        ) : (
+                                          <CheckCircle className="h-3 w-3 text-green-500 mt-0.5 flex-shrink-0" />
+                                        )}
+                                        <span>{reason}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+
+                                {/* Seniority Signals */}
+                                <div>
+                                  <div className="flex items-center justify-between text-sm mb-1">
+                                    <span className="font-medium text-gray-700">Seniority Signals</span>
+                                    <span className="text-gray-500">{score.senioritySignals.score}%</span>
+                                  </div>
+                                  <div className="w-full bg-gray-200 rounded-full h-2">
+                                    <div
+                                      className={`h-2 rounded-full ${
+                                        score.senioritySignals.score >= 70 ? 'bg-green-500' :
+                                        score.senioritySignals.score >= 40 ? 'bg-yellow-500' : 'bg-red-400'
+                                      }`}
+                                      style={{ width: `${score.senioritySignals.score}%` }}
+                                    />
+                                  </div>
+                                  <div className="mt-1 text-xs text-gray-500">
+                                    {score.senioritySignals.reasons.map((reason, i) => (
+                                      <div key={i} className="flex items-start gap-1">
+                                        {reason.includes('newer') ? (
+                                          <AlertCircle className="h-3 w-3 text-yellow-500 mt-0.5 flex-shrink-0" />
+                                        ) : (
+                                          <CheckCircle className="h-3 w-3 text-green-500 mt-0.5 flex-shrink-0" />
+                                        )}
+                                        <span>{reason}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+
+                                {/* Keyword Match */}
+                                <div>
+                                  <div className="flex items-center justify-between text-sm mb-1">
+                                    <span className="font-medium text-gray-700">Keyword Match</span>
+                                    <span className="text-gray-500">
+                                      {score.keywordMatch.matchedKeywords.length}/{score.keywordMatch.totalKeywords} ({score.keywordMatch.score}%)
+                                    </span>
+                                  </div>
+                                  <div className="w-full bg-gray-200 rounded-full h-2">
+                                    <div
+                                      className={`h-2 rounded-full ${
+                                        score.keywordMatch.score >= 70 ? 'bg-green-500' :
+                                        score.keywordMatch.score >= 40 ? 'bg-yellow-500' : 'bg-red-400'
+                                      }`}
+                                      style={{ width: `${score.keywordMatch.score}%` }}
+                                    />
+                                  </div>
+                                  <div className="mt-1 text-xs text-gray-500">
+                                    {score.keywordMatch.matchedKeywords.length > 0 ? (
+                                      <div className="flex flex-wrap gap-1 mt-1">
+                                        {score.keywordMatch.matchedKeywords.map((kw, i) => (
+                                          <span key={i} className="px-1.5 py-0.5 bg-green-100 text-green-700 rounded text-xs">
+                                            ✓ {kw}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    ) : (
+                                      <span className="text-gray-400">No keyword matches found in bio/company</span>
+                                    )}
+                                  </div>
+                                </div>
+
+                                {/* Contact Quality */}
+                                <div>
+                                  <div className="flex items-center justify-between text-sm mb-1">
+                                    <span className="font-medium text-gray-700">Contact Quality</span>
+                                    <span className="text-gray-500">{score.contactQuality.score}%</span>
+                                  </div>
+                                  <div className="w-full bg-gray-200 rounded-full h-2">
+                                    <div
+                                      className={`h-2 rounded-full ${
+                                        score.contactQuality.score >= 70 ? 'bg-green-500' :
+                                        score.contactQuality.score >= 40 ? 'bg-yellow-500' : 'bg-red-400'
+                                      }`}
+                                      style={{ width: `${score.contactQuality.score}%` }}
+                                    />
+                                  </div>
+                                  <div className="mt-1 text-xs text-gray-500">
+                                    {score.contactQuality.reasons.map((reason, i) => (
+                                      <div key={i} className="flex items-start gap-1">
+                                        {reason.startsWith('No ') ? (
+                                          <XCircle className="h-3 w-3 text-red-400 mt-0.5 flex-shrink-0" />
+                                        ) : (
+                                          <CheckCircle className="h-3 w-3 text-green-500 mt-0.5 flex-shrink-0" />
+                                        )}
+                                        <span>{reason}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="bg-white rounded-lg border border-gray-200 p-12 text-center">
+                <Github className="h-12 w-12 text-gray-300 mx-auto mb-4" />
+                <h3 className="font-medium text-gray-900 mb-2">No GitHub Results Yet</h3>
+                <p className="text-sm text-gray-500">
+                  Configure your search parameters and click "Search GitHub" to find developers
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================ */}
+      {/* LINKEDIN SOURCING UI */}
+      {/* ============================================================ */}
+      {searchSource === 'linkedin' && (
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left Panel - Search Configuration */}
         <div className="lg:col-span-1 space-y-4">
@@ -3636,6 +5096,7 @@ export default function SourcingPage() {
           )}
         </div>
       </div>
+      )}
 
       {/* Location Clarification Modal */}
       {showLocationModal && locationChoices.length > 0 && (

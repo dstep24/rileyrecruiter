@@ -19,6 +19,7 @@ model Tenant {
   conversations   Conversation[]
   criteria        Criteria[]
   documents       Document[]
+  domainConfigs   DomainConfig[]
   guidelines      Guidelines[]
   integrations    Integration[]
   jobRequisitions JobRequisition[]
@@ -26,6 +27,57 @@ model Tenant {
   teleoperators   TeleoperatorAssignment[]
 
   @@map("tenants")
+}
+
+// =============================================================================
+// DOMAIN CONFIG - Enables multiple (G, C) pairs per tenant
+// =============================================================================
+
+/// DomainConfig allows different (Guidelines, Criteria) pairs for different contexts
+/// Example domains: "senior-engineering", "entry-level", "healthcare-vertical"
+model DomainConfig {
+  id              String           @id @default(uuid())
+  tenantId        String
+  name            String           // "Senior Engineering"
+  slug            String           // "senior-engineering" - URL-safe identifier
+  description     String?
+
+  // Selection criteria - when does this domain apply?
+  // Array of conditions like: {field: "requisition.seniority", operator: "in", value: ["senior", "staff"]}
+  selectionRules  Json             @default("[]")
+  priority        Int              @default(0)     // Higher = checked first
+  isDefault       Boolean          @default(false) // Fallback domain for tenant
+
+  // Associated Guidelines and Criteria versions
+  guidelinesId    String?          // Active Guidelines for this domain
+  criteriaId      String?          // Active Criteria for this domain
+
+  // Domain-specific config overrides (merged with base G/C)
+  configOverrides Json             @default("{}")
+
+  status          DomainStatus     @default(ACTIVE)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  // Relationships
+  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  guidelines      Guidelines?      @relation(fields: [guidelinesId], references: [id])
+  criteria        Criteria?        @relation(fields: [criteriaId], references: [id])
+
+  // Tasks executed under this domain (for analytics)
+  tasks           Task[]           @relation("DomainTasks")
+  innerLoopRuns   InnerLoopRun[]   @relation("DomainInnerLoopRuns")
+
+  @@unique([tenantId, slug])
+  @@index([tenantId, status])
+  @@index([tenantId, isDefault])
+  @@map("domain_configs")
+}
+
+enum DomainStatus {
+  ACTIVE
+  INACTIVE
+  ARCHIVED
 }
 
 model Guidelines {
@@ -42,15 +94,28 @@ model Guidelines {
   changelog       String?
   effectiveFrom   DateTime?
   effectiveUntil  DateTime?
+
+  // Domain scope - null means tenant-wide (default behavior)
+  scope           GuidelinesScope  @default(TENANT)
+
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
   parentVersion   Guidelines?      @relation("GuidelinesVersionHistory", fields: [parentVersionId], references: [id])
   childVersions   Guidelines[]     @relation("GuidelinesVersionHistory")
   tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
+  // Domains using this Guidelines version
+  domains         DomainConfig[]
+
   @@unique([tenantId, version])
   @@index([tenantId, status])
+  @@index([tenantId, scope])
   @@map("guidelines")
+}
+
+enum GuidelinesScope {
+  TENANT    // Applies tenant-wide (current behavior)
+  DOMAIN    // Applies only to specific domain(s)
 }
 
 model Criteria {
@@ -67,15 +132,28 @@ model Criteria {
   changelog         String?
   effectiveFrom     DateTime?
   effectiveUntil    DateTime?
+
+  // Domain scope - null means tenant-wide (default behavior)
+  scope             CriteriaScope  @default(TENANT)
+
   createdAt         DateTime       @default(now())
   updatedAt         DateTime       @updatedAt
   parentVersion     Criteria?      @relation("CriteriaVersionHistory", fields: [parentVersionId], references: [id])
   childVersions     Criteria[]     @relation("CriteriaVersionHistory")
   tenant            Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
+  // Domains using this Criteria version
+  domains           DomainConfig[]
+
   @@unique([tenantId, version])
   @@index([tenantId, status])
+  @@index([tenantId, scope])
   @@map("criteria")
+}
+
+enum CriteriaScope {
+  TENANT    // Applies tenant-wide (current behavior)
+  DOMAIN    // Applies only to specific domain(s)
 }
 
 model JobRequisition {
@@ -258,6 +336,11 @@ model Task {
   priority         Priority          @default(MEDIUM)
   scheduledFor     DateTime?
   expiresAt        DateTime?
+
+  // Domain context - which (G, C) pair was used
+  domainId         String?
+  domain           DomainConfig?     @relation("DomainTasks", fields: [domainId], references: [id])
+
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
   requisition      JobRequisition?   @relation("RequisitionTasks", fields: [requisitionId], references: [id])
@@ -266,6 +349,7 @@ model Task {
   @@index([tenantId, status])
   @@index([tenantId, type])
   @@index([status, scheduledFor])
+  @@index([domainId])
   @@map("tasks")
 }
 
@@ -337,12 +421,21 @@ model InnerLoopRun {
   endGuidelinesVersion   Int?
   guidelinesUpdates      Json            @default("[]")
   outputTaskId           String?
+
+  // Domain context - which (G, C) pair was used
+  domainId               String?
+  domain                 DomainConfig?   @relation("DomainInnerLoopRuns", fields: [domainId], references: [id])
+
+  // Learning metadata
+  learningInsights       Json            @default("[]")  // Insights extracted during this run
+
   startedAt              DateTime        @default(now())
   completedAt            DateTime?
   createdAt              DateTime        @default(now())
 
   @@index([tenantId, createdAt])
   @@index([status])
+  @@index([domainId])
   @@map("inner_loop_runs")
 }
 

@@ -62,6 +62,9 @@ export interface InnerLoopContext {
   tenantId: string;
   taskType: TaskType;
 
+  // Domain selection (optional - if not provided, domain is auto-selected)
+  domainSlug?: string;
+
   // Input data for generation
   input: InnerLoopInput;
 
@@ -84,6 +87,23 @@ export interface InnerLoopInput {
 
   // Constraints
   constraints?: InnerLoopConstraint[];
+
+  // Domain selection context (used for rule matching)
+  requisition?: {
+    id?: string;
+    title?: string;
+    seniority?: string;
+    department?: string;
+    industry?: string;
+    location?: string;
+    locationType?: string;
+    requirements?: unknown[];
+    tags?: string[];
+    [key: string]: unknown;
+  };
+
+  // Additional domain context for rule matching
+  domainContext?: Record<string, unknown>;
 }
 
 export interface InnerLoopConstraint {
@@ -191,6 +211,11 @@ export interface InnerLoopRun {
   taskType: TaskType;
   context: InnerLoopContext;
   contextSnapshot: Record<string, unknown>; // Full context at start
+
+  // Domain selection
+  domainId?: string;
+  domainName?: string;
+  selectionMethod?: 'explicit' | 'rule_match' | 'default' | 'tenant_fallback';
 
   // Results
   status: InnerLoopStatus;

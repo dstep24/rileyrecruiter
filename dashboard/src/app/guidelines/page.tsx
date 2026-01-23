@@ -67,7 +67,7 @@ export default function GuidelinesPage() {
     setLoading(true);
     try {
       // Try real API first - versions
-      const versionsRes = await fetch(`${API_BASE}/api/guidelines/versions`, {
+      const versionsRes = await fetch(`${API_BASE}/api/demo/guidelines/versions`, {
         headers: { 'X-Tenant-Id': 'demo-tenant' },
       });
 
@@ -77,7 +77,7 @@ export default function GuidelinesPage() {
         setDemoMode(false);
 
         // Fetch active guidelines
-        const guidelinesRes = await fetch(`${API_BASE}/api/guidelines`, {
+        const guidelinesRes = await fetch(`${API_BASE}/api/demo/guidelines`, {
           headers: { 'X-Tenant-Id': 'demo-tenant' },
         });
         if (guidelinesRes.ok) {
@@ -92,8 +92,8 @@ export default function GuidelinesPage() {
       setDemoMode(true);
       try {
         const [versionsRes, guidelinesRes] = await Promise.all([
-          fetch(`${API_BASE}/api/guidelines/versions`),
-          fetch(`${API_BASE}/api/guidelines`),
+          fetch(`${API_BASE}/api/demo/guidelines/versions`),
+          fetch(`${API_BASE}/api/demo/guidelines`),
         ]);
 
         if (versionsRes.ok) {
@@ -138,7 +138,7 @@ export default function GuidelinesPage() {
     }
 
     try {
-      const res = await fetch(`${API_BASE}/api/guidelines/${versionId}/activate`, {
+      const res = await fetch(`${API_BASE}/api/demo/guidelines/${versionId}/activate`, {
         method: 'POST',
         headers: { 'X-Tenant-Id': 'demo-tenant' },
       });
@@ -162,7 +162,7 @@ export default function GuidelinesPage() {
     }
 
     try {
-      const res = await fetch(`${API_BASE}/api/guidelines/${versionId}/reject`, {
+      const res = await fetch(`${API_BASE}/api/demo/guidelines/${versionId}/reject`, {
         method: 'POST',
         headers: { 'X-Tenant-Id': 'demo-tenant' },
       });

@@ -103,6 +103,44 @@ export interface FollowUpMessage {
   trigger?: 'no_response' | 'viewed_profile' | 'connected';
 }
 
+// Email-specific types for GitHub sourced candidates
+export interface EmailOutreachInput {
+  candidate: CandidateProfile;
+  candidateScore?: CandidateScore;
+  role: RoleInfo;
+  guidelines: OutreachGuidelines;
+  githubProfile?: {
+    username: string;
+    bio?: string | null;
+    company?: string | null;
+    blog?: string | null;
+    topLanguages?: string[];
+    totalStars?: number;
+    publicRepos?: number;
+  };
+}
+
+export interface GeneratedEmailOutreach {
+  subject: string;
+  previewText: string;
+  htmlBody: string;
+  textBody: string;
+  personalization: {
+    elements: string[];
+    reasoning: string;
+  };
+  alternatives: Array<{
+    subject: string;
+    htmlBody: string;
+  }>;
+  metadata: {
+    channel: 'email';
+    subjectLength: number;
+    bodyLength: number;
+    generatedAt: Date;
+  };
+}
+
 // =============================================================================
 // CHANNEL LIMITS
 // =============================================================================
@@ -173,6 +211,49 @@ Great outreach doesn't just list requirements or funding rounds. It tells a stor
 - executive: Concise, strategic, focuses on impact and leadership
 
 Output valid JSON only - no markdown, no explanation outside the JSON.`;
+
+const EMAIL_OUTREACH_SYSTEM_PROMPT = `You are an expert technical recruiter writing cold outreach emails to developers sourced from GitHub.
+
+## CORE PHILOSOPHY
+Cold emails to developers need to stand out. Most developers get 10+ recruiter emails daily. Your job is to write emails that feel personal, reference their actual work, and sell an opportunity they'd be excited about.
+
+## WHAT WORKS FOR DEVELOPERS
+✓ Reference their actual GitHub repos, contributions, or technical writing
+✓ Show you understand their tech stack and what excites them
+✓ Lead with the technical challenge, not just company credentials
+✓ Be direct and respectful of their time
+✓ Give them a reason to reply that isn't just "money"
+
+## WHAT DEVELOPERS HATE
+✗ "I found your profile and was impressed" - be specific or don't bother
+✗ Keyword matching ("I see you know React...") - too generic
+✗ Requirements dumps - they don't care about your wishlist
+✗ Corporate speak and buzzwords
+✗ Mass-mail vibes
+
+## EMAIL STRUCTURE
+
+1. SUBJECT (50-60 chars)
+   - Create curiosity with specifics
+   - Reference their work if possible
+   - Example: "Your work on X caught my eye - founding eng role"
+
+2. PREVIEW TEXT (90-100 chars)
+   - Complements subject, doesn't repeat
+   - Hints at why you're reaching out
+
+3. BODY
+   - Open with specific reference to their work
+   - Briefly pitch the technical challenge/opportunity
+   - Include team credibility (founders' backgrounds)
+   - One clear CTA
+   - Keep under 200 words
+
+4. FOOTER
+   - Brief signature
+   - Unsubscribe option (required for CAN-SPAM)
+
+Output valid JSON only.`;
 
 function buildOutreachPrompt(input: OutreachInput): string {
   const charLimit = CHANNEL_LIMITS[input.channel];
@@ -489,6 +570,159 @@ Generate an improved version that addresses this feedback.`;
         generatedAt: new Date(),
       },
     };
+  }
+
+  // ===========================================================================
+  // EMAIL-SPECIFIC METHODS (for GitHub sourced candidates)
+  // ===========================================================================
+
+  /**
+   * Generate email outreach with HTML and plain text versions
+   * Optimized for cold email to GitHub-sourced candidates
+   */
+  async generateEmailOutreach(input: EmailOutreachInput): Promise<GeneratedEmailOutreach> {
+    const prompt = this.buildEmailPrompt(input);
+
+    const response = await this.claudeClient.chat({
+      systemPrompt: EMAIL_OUTREACH_SYSTEM_PROMPT,
+      prompt,
+      temperature: 0.7,
+      maxTokens: 2048,
+    });
+
+    const parsed = this.claudeClient.parseJsonResponse<{
+      subject: string;
+      previewText: string;
+      htmlBody: string;
+      textBody: string;
+      personalization: { elements: string[]; reasoning: string };
+      alternatives: Array<{ subject: string; htmlBody: string }>;
+    }>(response);
+
+    return {
+      subject: parsed.subject,
+      previewText: parsed.previewText,
+      htmlBody: parsed.htmlBody,
+      textBody: parsed.textBody || this.htmlToText(parsed.htmlBody),
+      personalization: parsed.personalization || { elements: [], reasoning: '' },
+      alternatives: parsed.alternatives || [],
+      metadata: {
+        channel: 'email' as const,
+        subjectLength: parsed.subject.length,
+        bodyLength: parsed.htmlBody.length,
+        generatedAt: new Date(),
+      },
+    };
+  }
+
+  /**
+   * Build email-specific prompt for GitHub candidates
+   */
+  private buildEmailPrompt(input: EmailOutreachInput): string {
+    const githubInfo = input.githubProfile ? `
+## GitHub Profile Intelligence (KEY for personalization!)
+Username: ${input.githubProfile.username}
+Top Languages: ${input.githubProfile.topLanguages?.join(', ') || 'Unknown'}
+Total Stars: ${input.githubProfile.totalStars || 0}
+Public Repos: ${input.githubProfile.publicRepos || 0}
+Bio: ${input.githubProfile.bio || 'N/A'}
+${input.githubProfile.blog ? `Blog: ${input.githubProfile.blog}` : ''}
+${input.githubProfile.company ? `Company: ${input.githubProfile.company}` : ''}
+` : '';
+
+    return `Write a cold outreach email to ${input.candidate.name}.
+
+${githubInfo}
+
+## Candidate Intelligence
+Name: ${input.candidate.name}
+Current Role: ${input.candidate.currentTitle || 'Unknown'} at ${input.candidate.currentCompany || 'Unknown'}
+Location: ${input.candidate.location || 'Unknown'}
+
+### Experience
+${input.candidate.experience.slice(0, 3).map(exp =>
+  `- ${exp.title} at ${exp.company} (${exp.duration})`
+).join('\n')}
+
+### Skills
+${input.candidate.skills.slice(0, 15).join(', ')}
+
+## The Opportunity
+Role: ${input.role.title} at ${input.role.company}
+${input.role.companyStage ? `Stage: ${input.role.companyStage}` : ''}
+${input.role.techStack ? `Tech Stack: ${input.role.techStack.join(', ')}` : ''}
+
+### Why This Role is Different
+${input.role.highlights.map(h => `- ${h}`).join('\n')}
+
+## Brand Guidelines
+Voice: ${input.guidelines.brandVoice}
+Recruiter: ${input.guidelines.recruiterName || 'The Recruiting Team'}
+CTA: ${input.guidelines.callToAction}
+
+## Email Format Requirements
+
+1. SUBJECT LINE (50-60 chars optimal for inbox preview)
+   - Create curiosity, use specific numbers/signals
+   - Must stand out in a crowded inbox
+
+2. PREVIEW TEXT (90-100 chars)
+   - Appears after subject in inbox
+   - Complement subject, don't repeat
+
+3. HTML BODY (under 3000 chars)
+   - Clean, mobile-friendly formatting
+   - Use <p> tags for paragraphs
+   - Include unsubscribe note at bottom
+   - ONE clear CTA with button styling optional
+
+4. TEXT BODY
+   - Plain text version of the email
+   - Include all links as full URLs
+
+## Output Format (JSON only)
+
+{
+  "subject": "<50-60 char subject line with concrete numbers/signals>",
+  "previewText": "<90-100 char preview text that complements subject>",
+  "htmlBody": "<HTML formatted email body>",
+  "textBody": "<plain text version>",
+  "personalization": {
+    "elements": ["<what specific GitHub/experience you referenced>"],
+    "reasoning": "<why these points make them feel special>"
+  },
+  "alternatives": [
+    {
+      "subject": "<alternative subject line>",
+      "htmlBody": "<alternative email body>"
+    }
+  ]
+}
+
+CRITICAL:
+- Reference their GitHub work specifically (repos, languages, contributions)
+- Subject line must create curiosity with concrete signals
+- Include unsubscribe option (CAN-SPAM compliance)
+- Mobile-friendly formatting
+- Single clear CTA`;
+  }
+
+  /**
+   * Convert HTML to plain text for email
+   */
+  private htmlToText(html: string): string {
+    return html
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/p>/gi, '\n\n')
+      .replace(/<p[^>]*>/gi, '')
+      .replace(/<a[^>]*href="([^"]*)"[^>]*>([^<]*)<\/a>/gi, '$2 ($1)')
+      .replace(/<[^>]+>/g, '')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
   }
 
   // ===========================================================================

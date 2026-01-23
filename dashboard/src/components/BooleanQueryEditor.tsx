@@ -210,7 +210,7 @@ export function BooleanQueryEditor({
     setIsValidating(true);
     try {
       // Call validation endpoint
-      const response = await fetch(`${API_BASE}/api/validate-boolean-query`, {
+      const response = await fetch(`${API_BASE}/api/demo/validate-boolean-query`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: q, apiType }),
@@ -230,7 +230,7 @@ export function BooleanQueryEditor({
       onValidationChange?.(result.isValid);
 
       // Get interpretation
-      const interpResponse = await fetch(`${API_BASE}/api/interpret-boolean-query`, {
+      const interpResponse = await fetch(`${API_BASE}/api/demo/interpret-boolean-query`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: q }),
@@ -271,7 +271,7 @@ export function BooleanQueryEditor({
   useEffect(() => {
     const loadPatterns = async () => {
       try {
-        const response = await fetch(`${API_BASE}/api/boolean-patterns`);
+        const response = await fetch(`${API_BASE}/api/demo/boolean-patterns`);
         if (response.ok) {
           const result = await response.json();
           setPatterns(result.patterns);

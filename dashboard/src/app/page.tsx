@@ -22,7 +22,7 @@ import {
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
 
 interface DashboardStats {
-  pendingApproval: number;
+  pendingOutreach: number;
   avgWaitTime: number;
   escalations: number;
   approvalRate: number;
@@ -66,6 +66,18 @@ export default function DashboardPage() {
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
+      // Get pending outreach count from localStorage queue
+      let pendingOutreachCount = 0;
+      try {
+        const savedQueue = localStorage.getItem('riley_messaging_queue');
+        if (savedQueue) {
+          const queue = JSON.parse(savedQueue);
+          pendingOutreachCount = queue.filter((item: { status: string }) => item.status === 'pending').length;
+        }
+      } catch {
+        // Ignore localStorage errors
+      }
+
       const [analyticsRes, tasksRes, activityRes] = await Promise.all([
         fetch(`${API_BASE}/api/analytics`),
         fetch(`${API_BASE}/api/tasks/pending`),
@@ -75,7 +87,7 @@ export default function DashboardPage() {
       if (analyticsRes.ok) {
         const analyticsData = await analyticsRes.json();
         setStats({
-          pendingApproval: analyticsData.data?.tasks?.pending || 0,
+          pendingOutreach: pendingOutreachCount,
           avgWaitTime: Math.round(analyticsData.data?.metrics?.avgApprovalTime || 0),
           escalations: analyticsData.data?.escalationBreakdown?.length || 0,
           approvalRate: Math.round((analyticsData.data?.metrics?.approvalRate || 0) * 100),
@@ -124,14 +136,15 @@ export default function DashboardPage() {
   }, [fetchData]);
 
   const triggerAction = async (action: string) => {
-    // Quick actions now navigate to the appropriate pages
-    // since we can't trigger actions without real data
+    // Quick actions navigate to the appropriate pages with correct parameters
     if (action === 'sourcing') {
       window.location.href = '/sourcing';
     } else if (action === 'outreach') {
-      window.location.href = '/queue?tab=direct-outreach';
-    } else if (action === 'screen') {
-      window.location.href = '/queue?tab=connection-flow';
+      // Navigate to queue with direct outreach flow (InMail/Direct Message)
+      window.location.href = '/queue?flow=direct';
+    } else if (action === 'review') {
+      // Navigate to queue with connection flow (connection requests)
+      window.location.href = '/queue?flow=connection';
     }
   };
 
@@ -156,9 +169,9 @@ export default function DashboardPage() {
 
   const statCards = [
     {
-      name: 'Pending Approval',
-      value: stats?.pendingApproval?.toString() || '0',
-      change: 'awaiting review',
+      name: 'Pending Outreach',
+      value: stats?.pendingOutreach?.toString() || '0',
+      change: 'ready to send',
       icon: CheckSquare,
       color: 'text-blue-600',
       bgColor: 'bg-blue-100',
@@ -267,7 +280,7 @@ export default function DashboardPage() {
                 </button>
 
                 <button
-                  onClick={() => triggerAction('screen')}
+                  onClick={() => triggerAction('review')}
                   className="flex items-center justify-center gap-2 p-4 border-2 border-dashed border-gray-200 rounded-lg hover:border-purple-300 hover:bg-purple-50 transition-colors"
                 >
                   <UserCheck className="h-5 w-5 text-purple-600" />

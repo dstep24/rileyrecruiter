@@ -19,6 +19,7 @@ import outreachRoutes from './routes/outreach.js'; // Outreach tracking routes
 import outreachSettingsRoutes from './routes/outreach-settings.js'; // Outreach settings (autopilot, etc.)
 import notificationsRoutes from './routes/notifications.js'; // Notification routes
 import calendlyRoutes from './routes/calendly.js'; // Calendly link rotation routes
+import settingsRoutes from './routes/settings.js'; // Settings configuration routes
 
 // =============================================================================
 // CREATE APP
@@ -104,6 +105,9 @@ export function createApp() {
 
   // Analytics API (real metrics from database)
   app.use('/api/analytics', analyticsRoutes);
+
+  // Settings API
+  app.use('/api/settings', settingsRoutes);
 
   // ===========================================================================
   // DEMO/SANDBOX ROUTES (for testing without real data)

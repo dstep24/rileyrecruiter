@@ -33,7 +33,12 @@ export type NotificationType =
   | 'FOLLOW_UP_DUE'
   | 'ASSESSMENT_COMPLETED'
   | 'ESCALATION_NEEDED'
-  | 'BOOKING_CONFIRMED';
+  | 'BOOKING_CONFIRMED'
+  // Email delivery events
+  | 'EMAIL_OPENED'
+  | 'EMAIL_CLICKED'
+  | 'EMAIL_BOUNCED'
+  | 'EMAIL_SPAM_COMPLAINT';
 
 export interface Notification {
   id: string;

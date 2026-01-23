@@ -1384,4 +1384,383 @@ async function handleCalendlyBookingCreated(payload: CalendlyWebhookPayload): Pr
   }
 }
 
+// =============================================================================
+// RESEND WEBHOOK - Email delivery tracking
+// =============================================================================
+
+// Resend webhook signing secret (optional but recommended for production)
+const RESEND_WEBHOOK_SECRET = process.env.RESEND_WEBHOOK_SECRET || '';
+
+/**
+ * Resend webhook event types
+ * See: https://resend.com/docs/dashboard/webhooks/introduction
+ */
+interface ResendWebhookPayload {
+  type:
+    | 'email.sent'
+    | 'email.delivered'
+    | 'email.delivery_delayed'
+    | 'email.complained'
+    | 'email.bounced'
+    | 'email.opened'
+    | 'email.clicked';
+  created_at: string;
+  data: {
+    email_id: string;
+    from: string;
+    to: string[];
+    subject: string;
+    created_at: string;
+    // For click events
+    click?: {
+      link: string;
+      timestamp: string;
+      user_agent?: string;
+      ip_address?: string;
+    };
+    // For bounce events
+    bounce?: {
+      message: string;
+    };
+    // For open events
+    open?: {
+      timestamp: string;
+      user_agent?: string;
+      ip_address?: string;
+    };
+  };
+}
+
+/**
+ * POST /webhooks/resend - Receive webhook events from Resend
+ *
+ * Handles email delivery status updates:
+ * - email.sent: Email was accepted for delivery
+ * - email.delivered: Email was delivered to recipient
+ * - email.opened: Recipient opened the email
+ * - email.clicked: Recipient clicked a link in the email
+ * - email.bounced: Email bounced (bad address, full inbox, etc.)
+ * - email.complained: Recipient marked as spam
+ *
+ * Setup instructions:
+ * 1. Go to Resend Dashboard > Webhooks
+ * 2. Create a webhook pointing to: https://your-domain.com/webhooks/resend
+ * 3. Subscribe to events: email.sent, email.delivered, email.opened, email.clicked, email.bounced
+ * 4. Copy the signing secret and add it as RESEND_WEBHOOK_SECRET env var
+ */
+router.post('/resend', async (req: Request, res: Response) => {
+  try {
+    // Verify webhook signature if secret is configured
+    if (RESEND_WEBHOOK_SECRET) {
+      const signature = req.headers['svix-signature'] as string | undefined;
+      const timestamp = req.headers['svix-timestamp'] as string | undefined;
+      const webhookId = req.headers['svix-id'] as string | undefined;
+
+      if (!signature || !timestamp || !webhookId) {
+        console.warn('[Resend Webhook] Missing signature headers');
+        return res.status(401).json({ error: 'Unauthorized - missing signature headers' });
+      }
+
+      // For full verification, use the Resend webhook verification
+      // The ResendClient has a verifyWebhook method for this
+      try {
+        const { getResendClient, isResendConfigured } = await import(
+          '../../integrations/email/ResendClient.js'
+        );
+        if (isResendConfigured()) {
+          const client = getResendClient();
+          // Resend webhook signature is the svix-signature header
+          const isValid = client.verifyWebhook(JSON.stringify(req.body), signature);
+          if (!isValid) {
+            console.warn('[Resend Webhook] Invalid signature');
+            return res.status(401).json({ error: 'Unauthorized - invalid signature' });
+          }
+        }
+      } catch (verifyError) {
+        console.error('[Resend Webhook] Signature verification error:', verifyError);
+        // Continue processing - verification is best-effort
+      }
+    }
+
+    const payload = req.body as ResendWebhookPayload;
+
+    console.log('[Resend Webhook] Received event:', payload.type, {
+      emailId: payload.data?.email_id,
+      to: payload.data?.to,
+      subject: payload.data?.subject?.substring(0, 50),
+    });
+
+    // Handle different event types
+    switch (payload.type) {
+      case 'email.sent':
+        await handleResendEmailSent(payload);
+        break;
+
+      case 'email.delivered':
+        await handleResendEmailDelivered(payload);
+        break;
+
+      case 'email.opened':
+        await handleResendEmailOpened(payload);
+        break;
+
+      case 'email.clicked':
+        await handleResendEmailClicked(payload);
+        break;
+
+      case 'email.bounced':
+        await handleResendEmailBounced(payload);
+        break;
+
+      case 'email.complained':
+        await handleResendEmailComplained(payload);
+        break;
+
+      case 'email.delivery_delayed':
+        console.log('[Resend Webhook] Email delivery delayed:', payload.data?.email_id);
+        break;
+
+      default:
+        console.log('[Resend Webhook] Unhandled event type:', payload.type);
+    }
+
+    return res.status(200).json({
+      success: true,
+      event: payload.type,
+      processed: true,
+    });
+  } catch (error) {
+    console.error('[Resend Webhook] Error processing webhook:', error);
+    return res.status(500).json({
+      error: 'Internal server error processing webhook',
+    });
+  }
+});
+
+/**
+ * Handle email sent event - email was accepted by Resend
+ */
+async function handleResendEmailSent(payload: ResendWebhookPayload): Promise<void> {
+  const emailId = payload.data?.email_id;
+
+  console.log('[Resend Webhook] Email sent:', emailId);
+
+  if (!emailId) return;
+
+  try {
+    // Find and update the OutreachTracker by emailMessageId
+    const tracker = await outreachTrackerRepo.findByEmailMessageId(emailId);
+
+    if (!tracker) {
+      console.log('[Resend Webhook] No matching outreach tracker for email:', emailId);
+      return;
+    }
+
+    await outreachTrackerRepo.updateEmailStatus(emailId, 'SENT');
+    console.log('[Resend Webhook] Updated tracker email status to SENT:', tracker.id);
+  } catch (error) {
+    console.error('[Resend Webhook] Error handling email.sent:', error);
+  }
+}
+
+/**
+ * Handle email delivered event - email reached recipient's inbox
+ */
+async function handleResendEmailDelivered(payload: ResendWebhookPayload): Promise<void> {
+  const emailId = payload.data?.email_id;
+
+  console.log('[Resend Webhook] Email delivered:', emailId);
+
+  if (!emailId) return;
+
+  try {
+    const tracker = await outreachTrackerRepo.findByEmailMessageId(emailId);
+
+    if (!tracker) {
+      console.log('[Resend Webhook] No matching outreach tracker for email:', emailId);
+      return;
+    }
+
+    await outreachTrackerRepo.updateEmailStatus(emailId, 'DELIVERED');
+    console.log('[Resend Webhook] Updated tracker email status to DELIVERED:', tracker.id);
+  } catch (error) {
+    console.error('[Resend Webhook] Error handling email.delivered:', error);
+  }
+}
+
+/**
+ * Handle email opened event - recipient opened the email
+ */
+async function handleResendEmailOpened(payload: ResendWebhookPayload): Promise<void> {
+  const emailId = payload.data?.email_id;
+  const openTimestamp = payload.data?.open?.timestamp || payload.created_at;
+
+  console.log('[Resend Webhook] Email opened:', emailId);
+
+  if (!emailId) return;
+
+  try {
+    const tracker = await outreachTrackerRepo.findByEmailMessageId(emailId);
+
+    if (!tracker) {
+      console.log('[Resend Webhook] No matching outreach tracker for email:', emailId);
+      return;
+    }
+
+    await outreachTrackerRepo.updateEmailStatus(emailId, 'OPENED', {
+      openedAt: new Date(openTimestamp),
+    });
+    console.log('[Resend Webhook] Updated tracker email status to OPENED:', tracker.id);
+
+    // Create notification for high-value engagement
+    const notificationService = getNotificationService();
+    await notificationService.create({
+      type: 'EMAIL_OPENED',
+      title: `Email opened by ${tracker.candidateName || 'candidate'}`,
+      message: `Your outreach email was opened`,
+      tenantId: tracker.tenantId,
+      trackerId: tracker.id,
+      metadata: {
+        emailId,
+        openedAt: openTimestamp,
+        candidateName: tracker.candidateName,
+      },
+    });
+  } catch (error) {
+    console.error('[Resend Webhook] Error handling email.opened:', error);
+  }
+}
+
+/**
+ * Handle email clicked event - recipient clicked a link
+ */
+async function handleResendEmailClicked(payload: ResendWebhookPayload): Promise<void> {
+  const emailId = payload.data?.email_id;
+  const clickTimestamp = payload.data?.click?.timestamp || payload.created_at;
+  const clickedLink = payload.data?.click?.link;
+
+  console.log('[Resend Webhook] Email link clicked:', emailId, clickedLink);
+
+  if (!emailId) return;
+
+  try {
+    const tracker = await outreachTrackerRepo.findByEmailMessageId(emailId);
+
+    if (!tracker) {
+      console.log('[Resend Webhook] No matching outreach tracker for email:', emailId);
+      return;
+    }
+
+    await outreachTrackerRepo.updateEmailStatus(emailId, 'CLICKED', {
+      clickedAt: new Date(clickTimestamp),
+    });
+    console.log('[Resend Webhook] Updated tracker email status to CLICKED:', tracker.id);
+
+    // Create notification - link clicks indicate high interest
+    const notificationService = getNotificationService();
+    await notificationService.create({
+      type: 'EMAIL_CLICKED',
+      title: `Email link clicked by ${tracker.candidateName || 'candidate'}`,
+      message: `${tracker.candidateName || 'Candidate'} clicked a link in your outreach email`,
+      tenantId: tracker.tenantId,
+      trackerId: tracker.id,
+      metadata: {
+        emailId,
+        clickedAt: clickTimestamp,
+        clickedLink,
+        candidateName: tracker.candidateName,
+      },
+    });
+  } catch (error) {
+    console.error('[Resend Webhook] Error handling email.clicked:', error);
+  }
+}
+
+/**
+ * Handle email bounced event - email could not be delivered
+ */
+async function handleResendEmailBounced(payload: ResendWebhookPayload): Promise<void> {
+  const emailId = payload.data?.email_id;
+  const bounceMessage = payload.data?.bounce?.message || 'Unknown reason';
+
+  console.log('[Resend Webhook] Email bounced:', emailId, bounceMessage);
+
+  if (!emailId) return;
+
+  try {
+    const tracker = await outreachTrackerRepo.findByEmailMessageId(emailId);
+
+    if (!tracker) {
+      console.log('[Resend Webhook] No matching outreach tracker for email:', emailId);
+      return;
+    }
+
+    await outreachTrackerRepo.updateEmailStatus(emailId, 'BOUNCED', {
+      bouncedAt: new Date(),
+      bounceReason: bounceMessage,
+    });
+    console.log('[Resend Webhook] Updated tracker email status to BOUNCED:', tracker.id);
+
+    // Create notification for bounced emails - need to try different contact method
+    const notificationService = getNotificationService();
+    await notificationService.create({
+      type: 'EMAIL_BOUNCED',
+      title: `Email bounced for ${tracker.candidateName || 'candidate'}`,
+      message: `Email could not be delivered: ${bounceMessage}`,
+      tenantId: tracker.tenantId,
+      trackerId: tracker.id,
+      metadata: {
+        emailId,
+        bounceReason: bounceMessage,
+        candidateName: tracker.candidateName,
+      },
+    });
+  } catch (error) {
+    console.error('[Resend Webhook] Error handling email.bounced:', error);
+  }
+}
+
+/**
+ * Handle email complained event - recipient marked as spam
+ */
+async function handleResendEmailComplained(payload: ResendWebhookPayload): Promise<void> {
+  const emailId = payload.data?.email_id;
+
+  console.log('[Resend Webhook] Email marked as spam:', emailId);
+
+  if (!emailId) return;
+
+  try {
+    const tracker = await outreachTrackerRepo.findByEmailMessageId(emailId);
+
+    if (!tracker) {
+      console.log('[Resend Webhook] No matching outreach tracker for email:', emailId);
+      return;
+    }
+
+    // Mark as bounced with spam complaint reason
+    await outreachTrackerRepo.updateEmailStatus(emailId, 'BOUNCED', {
+      bouncedAt: new Date(),
+      bounceReason: 'Marked as spam by recipient',
+    });
+    console.log('[Resend Webhook] Updated tracker - marked as spam complaint:', tracker.id);
+
+    // Create notification - spam complaints are serious
+    const notificationService = getNotificationService();
+    await notificationService.create({
+      type: 'EMAIL_SPAM_COMPLAINT',
+      title: `Spam complaint from ${tracker.candidateName || 'candidate'}`,
+      message: `${tracker.candidateName || 'Candidate'} marked your email as spam. Consider adjusting outreach approach.`,
+      tenantId: tracker.tenantId,
+      trackerId: tracker.id,
+      metadata: {
+        emailId,
+        candidateName: tracker.candidateName,
+      },
+    });
+  } catch (error) {
+    console.error('[Resend Webhook] Error handling email.complained:', error);
+  }
+}
+
 export default router;
