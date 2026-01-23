@@ -124,6 +124,33 @@ export class OutreachTrackerRepository {
   }
 
   /**
+   * Find trackers by multiple provider IDs (for batch status sync)
+   * Returns the most recent tracker for each provider ID
+   */
+  async findByProviderIds(providerIds: string[]): Promise<OutreachTracker[]> {
+    // Get all trackers for these provider IDs
+    const trackers = await prisma.outreachTracker.findMany({
+      where: {
+        candidateProviderId: { in: providerIds },
+      },
+      orderBy: { sentAt: 'desc' },
+    });
+
+    // Return only the most recent tracker per provider ID
+    const seenProviders = new Set<string>();
+    const result: OutreachTracker[] = [];
+
+    for (const tracker of trackers) {
+      if (!seenProviders.has(tracker.candidateProviderId)) {
+        seenProviders.add(tracker.candidateProviderId);
+        result.push(tracker);
+      }
+    }
+
+    return result;
+  }
+
+  /**
    * Update status when connection is accepted
    */
   async markConnectionAccepted(id: string): Promise<OutreachTracker> {

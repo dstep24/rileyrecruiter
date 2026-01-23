@@ -26,6 +26,19 @@ import {
   Link2,
   Copy,
 } from 'lucide-react';
+import { OutreachProgressModal, type OutreachProgress } from '../../components/OutreachProgressModal';
+import {
+  TIMING_PROFILES,
+  humanLikeDelay,
+  incrementConnectionCount,
+  incrementInMailCount,
+  incrementMessageCount,
+  canSendConnection,
+  canSendInMail,
+  canSendMessage,
+  getRemainingAllowance,
+  type HumanLikeTimingConfig,
+} from '../../lib/humanLikeTiming';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
 
@@ -150,6 +163,22 @@ export default function QueuePage() {
   const [linkingAssessment, setLinkingAssessment] = useState<string | null>(null); // candidate id being linked
   const [sendingPitch, setSendingPitch] = useState<Set<string>>(new Set()); // tracking pitch sends
 
+  // Human-like outreach timing state
+  const [showOutreachProgress, setShowOutreachProgress] = useState(false);
+  const [outreachProgress, setOutreachProgress] = useState<OutreachProgress>({
+    current: 0,
+    total: 0,
+    status: 'waiting',
+    statusMessage: '',
+    remainingMs: 0,
+    isBreak: false,
+    successCount: 0,
+    failureCount: 0,
+    errors: [],
+  });
+  const outreachCancelledRef = useRef(false);
+  const timingConfig: HumanLikeTimingConfig = TIMING_PROFILES.moderate;
+
   // Initialize activeFlow from URL params, default to 'connection'
   const initialFlow = searchParams.get('flow') as OutreachFlow | null;
   const [activeFlow, setActiveFlow] = useState<OutreachFlow>(
@@ -162,6 +191,95 @@ export default function QueuePage() {
     loadQueue();
     fetchAssessmentTemplates();
   }, []);
+
+  // Sync queue status with backend every 30 seconds
+  // This catches connection acceptances, pitch sends, etc.
+  useEffect(() => {
+    const syncStatusWithBackend = async () => {
+      // Get all provider IDs from queue items that are in "sent" status
+      const sentItems = queue.filter(item => item.providerId && item.status === 'sent');
+      if (sentItems.length === 0) return;
+
+      const providerIds = sentItems.map(item => item.providerId).filter(Boolean) as string[];
+
+      try {
+        const response = await fetch(`${API_BASE}/api/outreach/status-by-providers`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ providerIds }),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          const statusMap = data.statusMap as Record<string, {
+            trackerId: string;
+            status: string;
+            acceptedAt: string | null;
+            pitchSentAt: string | null;
+          }>;
+
+          // Update queue items based on backend status
+          let hasUpdates = false;
+          const updatedQueue = queue.map(item => {
+            if (!item.providerId || !statusMap[item.providerId]) return item;
+
+            const backendStatus = statusMap[item.providerId];
+
+            // Map backend status to queue status
+            let newStatus: QueuedCandidate['status'] = item.status;
+            let trackerId = item.trackerId;
+
+            if (backendStatus.status === 'CONNECTION_ACCEPTED' && item.status === 'sent') {
+              newStatus = 'connection_accepted';
+              hasUpdates = true;
+            } else if (backendStatus.status === 'PITCH_PENDING' && item.status !== 'pitch_pending' && item.status !== 'pitch_sent') {
+              newStatus = 'pitch_pending';
+              hasUpdates = true;
+            } else if (backendStatus.status === 'PITCH_SENT' && item.status !== 'pitch_sent' && item.status !== 'replied') {
+              newStatus = 'pitch_sent';
+              hasUpdates = true;
+            } else if (backendStatus.status === 'REPLIED' && item.status !== 'replied') {
+              newStatus = 'replied';
+              hasUpdates = true;
+            }
+
+            // Always update trackerId if we have one
+            if (backendStatus.trackerId && !item.trackerId) {
+              trackerId = backendStatus.trackerId;
+              hasUpdates = true;
+            }
+
+            if (newStatus !== item.status || trackerId !== item.trackerId) {
+              return {
+                ...item,
+                status: newStatus,
+                trackerId,
+                acceptedAt: backendStatus.acceptedAt || item.acceptedAt,
+                pitchSentAt: backendStatus.pitchSentAt || item.pitchSentAt,
+              };
+            }
+
+            return item;
+          });
+
+          if (hasUpdates) {
+            console.log('[Queue] Synced status updates from backend');
+            saveQueue(updatedQueue);
+          }
+        }
+      } catch (err) {
+        console.error('[Queue] Failed to sync status with backend:', err);
+      }
+    };
+
+    // Initial sync
+    syncStatusWithBackend();
+
+    // Set up polling interval (every 30 seconds)
+    const interval = setInterval(syncStatusWithBackend, 30000);
+
+    return () => clearInterval(interval);
+  }, [queue]);
 
   // Fetch available assessment templates for linking
   const fetchAssessmentTemplates = async () => {
@@ -686,13 +804,271 @@ Best regards`;
     }
   };
 
-  // Send all selected messages
+  // Send all selected messages with human-like timing
   const sendSelected = async () => {
-    const itemsToSend = pendingItems.filter((item) => selectedItems.has(item.id));
-    for (const item of itemsToSend) {
-      await sendMessage(item);
+    const itemsToSend = pendingItems.filter((item) => selectedItems.has(item.id) && item.providerId);
+
+    if (itemsToSend.length === 0) {
+      setError('No valid candidates selected (missing LinkedIn provider IDs)');
+      return;
     }
+
+    // Check daily limits based on message types
+    const connectionItems = itemsToSend.filter(
+      i => i.messageType === 'connection_request' || i.messageType === 'connection_only'
+    );
+    const inMailItems = itemsToSend.filter(i => i.messageType === 'inmail');
+    const messageItems = itemsToSend.filter(i => i.messageType === 'message');
+
+    const remaining = getRemainingAllowance(timingConfig);
+
+    if (connectionItems.length > 0 && !canSendConnection(timingConfig)) {
+      setError(`Daily connection limit reached. ${remaining.connections} connections remaining for today.`);
+      return;
+    }
+    if (inMailItems.length > 0 && !canSendInMail(timingConfig)) {
+      setError(`Daily InMail limit reached. ${remaining.inMails} InMails remaining for today.`);
+      return;
+    }
+    if (messageItems.length > 0 && !canSendMessage(timingConfig)) {
+      setError(`Daily message limit reached. ${remaining.messages} messages remaining for today.`);
+      return;
+    }
+
+    // Initialize progress modal
+    let sent = 0;
+    let failed = 0;
+    let lastBreakAt = 0;
+    const errors: Array<{ candidateName: string; error: string }> = [];
+
+    outreachCancelledRef.current = false;
+    setOutreachProgress({
+      current: 0,
+      total: itemsToSend.length,
+      status: 'waiting',
+      statusMessage: 'Starting outreach...',
+      remainingMs: 0,
+      isBreak: false,
+      successCount: 0,
+      failureCount: 0,
+      errors: [],
+    });
+    setShowOutreachProgress(true);
+
+    for (let i = 0; i < itemsToSend.length; i++) {
+      const item = itemsToSend[i];
+
+      // Check if cancelled
+      if (outreachCancelledRef.current) {
+        console.log('[Queue] Outreach cancelled by user');
+        setOutreachProgress(prev => ({
+          ...prev,
+          status: 'cancelled',
+          statusMessage: 'Outreach cancelled by user',
+        }));
+        break;
+      }
+
+      // Human-like delay before sending (except first message)
+      if (i > 0) {
+        const delayResult = await humanLikeDelay(
+          sent + failed,
+          timingConfig,
+          lastBreakAt,
+          (status, remainingMs, isBreak) => {
+            setOutreachProgress(prev => ({
+              ...prev,
+              status: isBreak ? 'break' : 'waiting',
+              statusMessage: status,
+              remainingMs,
+              isBreak,
+            }));
+          },
+          () => outreachCancelledRef.current
+        );
+
+        if (delayResult.cancelled) {
+          console.log('[Queue] Outreach cancelled during delay');
+          setOutreachProgress(prev => ({
+            ...prev,
+            status: 'cancelled',
+            statusMessage: 'Outreach cancelled by user',
+          }));
+          break;
+        }
+
+        if (delayResult.tookBreak) {
+          lastBreakAt = sent + failed;
+        }
+      }
+
+      // Update progress to show sending
+      setOutreachProgress(prev => ({
+        ...prev,
+        current: i + 1,
+        status: 'sending',
+        statusMessage: `Sending to ${item.name}...`,
+        currentCandidateName: item.name,
+        remainingMs: 0,
+        isBreak: false,
+      }));
+
+      // Send the message
+      try {
+        await sendMessageWithTracking(item);
+        sent++;
+
+        // Update daily stats based on message type
+        if (item.messageType === 'connection_request' || item.messageType === 'connection_only') {
+          incrementConnectionCount(1);
+        } else if (item.messageType === 'inmail') {
+          incrementInMailCount(1);
+        } else {
+          incrementMessageCount(1);
+        }
+
+        setOutreachProgress(prev => ({
+          ...prev,
+          successCount: sent,
+        }));
+      } catch (err) {
+        failed++;
+        const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+        errors.push({ candidateName: item.name, error: errorMsg });
+        setOutreachProgress(prev => ({
+          ...prev,
+          failureCount: failed,
+          errors: [...errors],
+        }));
+      }
+    }
+
+    // Update final status
+    if (!outreachCancelledRef.current) {
+      setOutreachProgress(prev => ({
+        ...prev,
+        status: 'complete',
+        statusMessage: `Sent ${sent} messages, ${failed} failed`,
+        currentCandidateName: undefined,
+      }));
+    }
+
     setSelectedItems(new Set());
+  };
+
+  // Internal send function that throws on error (for batch sending)
+  const sendMessageWithTracking = async (item: QueuedCandidate): Promise<void> => {
+    if (!unipileConfig) {
+      throw new Error('LinkedIn is not connected');
+    }
+
+    if (!item.providerId) {
+      throw new Error('Missing LinkedIn provider ID');
+    }
+
+    const messageText = item.messageDraft || generateDefaultMessage(item);
+    const apiUrl = `https://${unipileConfig.dsn}.unipile.com:${unipileConfig.port}/api/v1`;
+
+    if (item.messageType === 'connection_request' || item.messageType === 'connection_only') {
+      // Send connection request - with or without message
+      const requestBody: Record<string, string> = {
+        provider_id: item.providerId,
+        account_id: unipileConfig.accountId,
+      };
+
+      if (item.messageType === 'connection_request') {
+        requestBody.message = messageText;
+      }
+
+      const response = await fetch(`${apiUrl}/users/invite`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-KEY': unipileConfig.apiKey,
+        },
+        body: JSON.stringify(requestBody),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        // Update queue item status to failed
+        const updatedQueue = queue.map((q) =>
+          q.id === item.id
+            ? { ...q, status: 'failed' as const, errorMessage: errorText }
+            : q
+        );
+        saveQueue(updatedQueue);
+        throw new Error(`Failed to send connection request: ${response.status} - ${errorText}`);
+      }
+
+      console.log(`[Queue] Connection request ${item.messageType === 'connection_only' ? '(no message)' : 'with message'} sent to ${item.name}`);
+
+      // Create outreach tracker
+      try {
+        const trackerResponse = await fetch(`${API_BASE}/api/outreach/track`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            candidateProviderId: item.providerId,
+            candidateName: item.name,
+            candidateProfileUrl: item.profileUrl,
+            outreachType: item.messageType === 'connection_only' ? 'CONNECTION_ONLY' : 'CONNECTION_REQUEST',
+            messageContent: item.messageType === 'connection_request' ? messageText : undefined,
+            jobRequisitionId: item.jobRequisitionId,
+            jobTitle: item.searchCriteria?.jobTitle,
+            assessmentTemplateId: item.assessmentTemplateId,
+            sourceQueueItemId: item.id,
+          }),
+        });
+
+        if (trackerResponse.ok) {
+          const trackerData = await trackerResponse.json();
+          item.trackerId = trackerData.tracker?.id;
+        }
+      } catch (trackerErr) {
+        console.warn('[Queue] Error creating outreach tracker:', trackerErr);
+      }
+    } else {
+      // Send InMail or direct message via starting a new chat
+      const response = await fetch(`${apiUrl}/chats`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-KEY': unipileConfig.apiKey,
+        },
+        body: JSON.stringify({
+          account_id: unipileConfig.accountId,
+          text: messageText,
+          attendees_ids: [item.providerId],
+          options: item.messageType === 'inmail' ? {
+            linkedin: {
+              api: 'classic',
+              inmail: true,
+            },
+          } : undefined,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        // Update queue item status to failed
+        const updatedQueue = queue.map((q) =>
+          q.id === item.id
+            ? { ...q, status: 'failed' as const, errorMessage: errorText }
+            : q
+        );
+        saveQueue(updatedQueue);
+        throw new Error(`Failed to send message: ${response.status} - ${errorText}`);
+      }
+
+      console.log(`[Queue] ${item.messageType} sent to ${item.name}`);
+    }
+
+    // Update item status to sent
+    const updatedQueue = queue.map((q) =>
+      q.id === item.id ? { ...q, status: 'sent' as const } : q
+    );
+    saveQueue(updatedQueue);
   };
 
   // Send pitch to a connected candidate (manual pitch when autopilot is off)
@@ -1724,6 +2100,34 @@ Best regards`;
           </div>
         </div>
       )}
+
+      {/* Human-Like Outreach Progress Modal */}
+      <OutreachProgressModal
+        isOpen={showOutreachProgress}
+        progress={outreachProgress}
+        config={timingConfig}
+        outreachType={outreachProgress.total > 0 ?
+          (pendingItems.find(i => selectedItems.has(i.id))?.messageType === 'inmail' ? 'inmail' :
+           pendingItems.find(i => selectedItems.has(i.id))?.messageType === 'message' ? 'message' : 'connection')
+          : 'connection'}
+        onCancel={() => {
+          outreachCancelledRef.current = true;
+        }}
+        onClose={() => {
+          setShowOutreachProgress(false);
+          setOutreachProgress({
+            current: 0,
+            total: 0,
+            status: 'waiting',
+            statusMessage: '',
+            remainingMs: 0,
+            isBreak: false,
+            successCount: 0,
+            failureCount: 0,
+            errors: [],
+          });
+        }}
+      />
     </div>
   );
 }

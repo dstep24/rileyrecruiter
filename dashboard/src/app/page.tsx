@@ -40,6 +40,29 @@ interface Task {
   createdAt: string;
 }
 
+// Must match QueuedCandidate from sourcing/page.tsx
+interface QueueItem {
+  id: string;
+  candidateId: string;
+  providerId?: string;
+  name: string;
+  headline?: string;
+  currentTitle?: string;
+  currentCompany?: string;
+  location?: string;
+  profileUrl: string;
+  profilePictureUrl?: string;
+  relevanceScore: number;
+  status: 'pending' | 'approved' | 'sent' | 'rejected';
+  messageType: 'connection_request' | 'inmail' | 'message';
+  messageDraft?: string;
+  createdAt: string;
+  searchCriteria?: {
+    jobTitle: string;
+    skills: string[];
+  };
+}
+
 interface Activity {
   id: string;
   type: string;
@@ -58,6 +81,7 @@ interface GuidelinesVersion {
 export default function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [recentTasks, setRecentTasks] = useState<Task[]>([]);
+  const [queueItems, setQueueItems] = useState<QueueItem[]>([]);
   const [activities, setActivities] = useState<Activity[]>([]);
   const [guidelinesUpdates, setGuidelinesUpdates] = useState<GuidelinesVersion[]>([]);
   const [loading, setLoading] = useState(true);
@@ -66,17 +90,24 @@ export default function DashboardPage() {
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      // Get pending outreach count from localStorage queue
+      // Get pending outreach count and items from localStorage queue
       let pendingOutreachCount = 0;
+      let pendingQueueItems: QueueItem[] = [];
       try {
         const savedQueue = localStorage.getItem('riley_messaging_queue');
         if (savedQueue) {
-          const queue = JSON.parse(savedQueue);
-          pendingOutreachCount = queue.filter((item: { status: string }) => item.status === 'pending').length;
+          const queue: QueueItem[] = JSON.parse(savedQueue);
+          const pendingItems = queue.filter((item) => item.status === 'pending');
+          pendingOutreachCount = pendingItems.length;
+          // Get the 5 most recent pending items
+          pendingQueueItems = pendingItems
+            .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+            .slice(0, 5);
         }
       } catch {
         // Ignore localStorage errors
       }
+      setQueueItems(pendingQueueItems);
 
       const [analyticsRes, tasksRes, activityRes] = await Promise.all([
         fetch(`${API_BASE}/api/analytics`),
@@ -291,50 +322,51 @@ export default function DashboardPage() {
           </Card>
         </div>
 
-        {/* Recent Tasks */}
+        {/* Pending Outreach Queue */}
         <div className="mt-8">
           <Card>
             <CardHeader>
-              <CardTitle>Recent Pending Tasks</CardTitle>
+              <CardTitle>Pending Outreach Queue</CardTitle>
             </CardHeader>
             <CardContent>
-              {recentTasks.length > 0 ? (
+              {queueItems.length > 0 ? (
                 <div className="overflow-x-auto">
                   <table className="w-full">
                     <thead>
                       <tr className="border-b border-gray-200 text-left text-sm text-gray-500">
                         <th className="pb-3 font-medium">Type</th>
                         <th className="pb-3 font-medium">Candidate</th>
-                        <th className="pb-3 font-medium">Priority</th>
+                        <th className="pb-3 font-medium">Job</th>
                         <th className="pb-3 font-medium">Wait Time</th>
                         <th className="pb-3 font-medium">Actions</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
-                      {recentTasks.map((task) => (
-                        <tr key={task.id} className="text-sm">
+                      {queueItems.map((item) => (
+                        <tr key={item.id} className="text-sm">
                           <td className="py-4">
-                            <span className="rounded bg-gray-100 px-2 py-1 text-xs font-medium">
-                              {task.type.replace(/_/g, ' ')}
+                            <span className={`rounded px-2 py-1 text-xs font-medium ${
+                              item.messageType === 'connection_request'
+                                ? 'bg-blue-100 text-blue-800'
+                                : item.messageType === 'inmail'
+                                ? 'bg-purple-100 text-purple-800'
+                                : 'bg-green-100 text-green-800'
+                            }`}>
+                              {item.messageType === 'connection_request' ? 'Connection' : item.messageType === 'inmail' ? 'InMail' : 'Direct'}
                             </span>
                           </td>
-                          <td className="py-4 font-medium text-gray-900">
-                            {task.payload?.candidateName || 'Unknown'}
-                          </td>
                           <td className="py-4">
-                            <span
-                              className={`rounded-full px-2 py-1 text-xs font-medium ${
-                                task.priority === 'URGENT'
-                                  ? 'bg-red-100 text-red-800'
-                                  : task.priority === 'HIGH'
-                                  ? 'bg-yellow-100 text-yellow-800'
-                                  : 'bg-gray-100 text-gray-800'
-                              }`}
-                            >
-                              {task.priority}
-                            </span>
+                            <div>
+                              <span className="font-medium text-gray-900">{item.name}</span>
+                              {item.headline && (
+                                <p className="text-xs text-gray-500 truncate max-w-xs">{item.headline}</p>
+                              )}
+                            </div>
                           </td>
-                          <td className="py-4 text-gray-500">{formatWaitTime(task.createdAt)}</td>
+                          <td className="py-4 text-gray-600 text-sm">
+                            {item.searchCriteria?.jobTitle || '-'}
+                          </td>
+                          <td className="py-4 text-gray-500">{formatWaitTime(item.createdAt)}</td>
                           <td className="py-4">
                             <a href="/queue" className="text-blue-600 hover:text-blue-800">
                               Review
@@ -346,7 +378,7 @@ export default function DashboardPage() {
                   </table>
                 </div>
               ) : (
-                <p className="text-gray-500 text-center py-8">No pending tasks</p>
+                <p className="text-gray-500 text-center py-8">No pending outreach in queue</p>
               )}
             </CardContent>
           </Card>

@@ -1203,10 +1203,13 @@ router.post('/ai/generate-search-strategy', async (req, res) => {
       resetClaudeClient();
 
       const { AIQueryGenerator, resetAIQueryGenerator, buildBooleanQueryForApi } = await import('../../domain/services/AIQueryGenerator.js');
+      const { getJobDescriptionParser } = await import('../../domain/services/JobDescriptionParser.js');
       resetAIQueryGenerator();
 
       const generator = new AIQueryGenerator();
+      const jdParser = getJobDescriptionParser();
 
+      // Generate AI search strategy
       const strategy = await generator.generateSearchStrategy({
         title,
         jobDescription: description || '',
@@ -1217,6 +1220,27 @@ router.post('/ai/generate-search-strategy', async (req, res) => {
         intakeNotes, // Notes from HM that take precedence over JD
         isFullyRemote,
       });
+
+      // Extract skill taxonomy for coherent scoring
+      // This ensures we only score candidates against what we searched for
+      let skillTaxonomy = null;
+      try {
+        skillTaxonomy = await jdParser.extractSkillTaxonomy({
+          title,
+          description: description || '',
+          requirements: skills || [],
+          location,
+          remoteType: isFullyRemote ? 'remote' : undefined,
+        });
+        console.log('[AI Parse JD] Extracted skill taxonomy:', {
+          core: skillTaxonomy.coreCompetency.skill,
+          critical: skillTaxonomy.criticalSkills.map((s: { skill: string }) => s.skill),
+          confidence: skillTaxonomy.extractionConfidence,
+        });
+      } catch (taxonomyError) {
+        console.warn('[AI Parse JD] Skill taxonomy extraction failed:', taxonomyError);
+        // Continue without taxonomy - scoring will use fallback
+      }
 
       // Generate Boolean query using our function that ALWAYS includes must-have skills
       // This is critical: title-only searches return people with wrong tech stack
@@ -1273,6 +1297,17 @@ router.post('/ai/generate-search-strategy', async (req, res) => {
           reasoning: strategy.reasoning,
           confidence: strategy.confidence,
         },
+        // Skill taxonomy for coherent scoring - only score against what was searched
+        skillTaxonomy: skillTaxonomy ? {
+          coreCompetency: skillTaxonomy.coreCompetency,
+          criticalSkills: skillTaxonomy.criticalSkills,
+          requiredSkills: skillTaxonomy.requiredSkills,
+          preferredSkills: skillTaxonomy.preferredSkills,
+          adjacentSkills: skillTaxonomy.adjacentSkills,
+          roleType: skillTaxonomy.roleType,
+          experienceProfile: skillTaxonomy.experienceProfile,
+          extractionConfidence: skillTaxonomy.extractionConfidence,
+        } : null,
       });
     } catch (error) {
       // Clean up temporary API key on error

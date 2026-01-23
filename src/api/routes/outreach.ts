@@ -281,6 +281,54 @@ router.post('/process-follow-ups', async (_req: Request, res: Response) => {
 });
 
 /**
+ * POST /api/outreach/status-by-providers - Get tracker status for multiple provider IDs
+ * Used by the queue page to sync connection acceptance status
+ */
+router.post('/status-by-providers', async (req: Request, res: Response) => {
+  try {
+    const { providerIds } = req.body;
+
+    if (!Array.isArray(providerIds) || providerIds.length === 0) {
+      return res.status(400).json({ error: 'providerIds array is required' });
+    }
+
+    // Limit to prevent abuse
+    if (providerIds.length > 100) {
+      return res.status(400).json({ error: 'Maximum 100 provider IDs per request' });
+    }
+
+    const trackers = await outreachTrackerRepo.findByProviderIds(providerIds);
+
+    // Return a map of providerId -> status info
+    const statusMap: Record<string, {
+      trackerId: string;
+      status: string;
+      acceptedAt: string | null;
+      pitchSentAt: string | null;
+    }> = {};
+
+    for (const tracker of trackers) {
+      statusMap[tracker.candidateProviderId] = {
+        trackerId: tracker.id,
+        status: tracker.status,
+        acceptedAt: tracker.acceptedAt?.toISOString() || null,
+        pitchSentAt: tracker.pitchSentAt?.toISOString() || null,
+      };
+    }
+
+    return res.json({
+      success: true,
+      statusMap,
+    });
+  } catch (error) {
+    console.error('[Outreach API] Error fetching tracker status by providers:', error);
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : 'Failed to fetch tracker status',
+    });
+  }
+});
+
+/**
  * GET /api/outreach/scheduler-status - Get follow-up scheduler status
  */
 router.get('/scheduler-status', async (_req: Request, res: Response) => {

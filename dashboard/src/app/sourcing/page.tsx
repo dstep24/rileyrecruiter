@@ -35,11 +35,27 @@ import {
   Star,
   GitFork,
   Code,
+  Target,
+  Zap,
+  X,
+  ArrowRight,
 } from 'lucide-react';
 import { CandidateScoreCard, BatchScoringSummaryCard, type CandidateScore } from '../../components/CandidateScoreCard';
 import { SourcingScoreCard, BatchSourcingSummaryCard, type SourcingScore } from '../../components/SourcingScoreCard';
 import { BooleanQueryEditor } from '../../components/BooleanQueryEditor';
 import { useRileyContext } from '../../components/providers/RileyContext';
+import { OutreachProgressModal, type OutreachProgress } from '../../components/OutreachProgressModal';
+import {
+  TIMING_PROFILES,
+  humanLikeDelay,
+  getDailyStats,
+  incrementConnectionCount,
+  canSendConnection,
+  getRemainingAllowance,
+  estimateBatchTime,
+  formatDuration,
+  type HumanLikeTimingConfig,
+} from '../../lib/humanLikeTiming';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
 
@@ -189,6 +205,44 @@ interface AISearchStrategy {
   confidence: number;
 }
 
+// Weighted skill taxonomy for coherent scoring
+// This ensures we only score candidates against skills that were actually searched for
+interface WeightedSkill {
+  skill: string;
+  weight: number;
+  category: 'language' | 'framework' | 'database' | 'cloud' | 'tool' | 'architecture' | 'domain' | 'process';
+  evidence?: string[];
+  synonyms?: string[];
+}
+
+interface SkillTaxonomy {
+  coreCompetency: {
+    skill: string;
+    confidence: number;
+    evidence: string[];
+    synonyms: string[];
+    minYearsExpected: number;
+  };
+  criticalSkills: WeightedSkill[];
+  requiredSkills: WeightedSkill[];
+  preferredSkills: WeightedSkill[];
+  adjacentSkills: string[];
+  roleType: {
+    domain: 'frontend' | 'backend' | 'fullstack' | 'mobile' | 'devops' | 'data' | 'ml' | 'security' | 'platform';
+    level: 'junior' | 'mid' | 'senior' | 'staff' | 'principal' | 'lead' | 'manager' | 'director';
+    isManagement: boolean;
+    isContractor: boolean;
+  };
+  experienceProfile: {
+    totalYearsMin: number;
+    totalYearsMax: number;
+    yearsInPrimarySkill: number;
+    leadershipYears?: number;
+    scaleIndicators: string[];
+  };
+  extractionConfidence: number;
+}
+
 interface CandidateExperience {
   title: string;
   company: string;
@@ -233,8 +287,8 @@ interface QueuedCandidate {
   profileUrl: string;
   profilePictureUrl?: string;
   relevanceScore: number;
-  status: 'pending' | 'approved' | 'sent' | 'rejected';
-  messageType: 'connection_request' | 'inmail' | 'message';
+  status: 'pending' | 'approved' | 'sent' | 'rejected' | 'failed';
+  messageType: 'connection_request' | 'connection_only' | 'inmail' | 'message';
   messageDraft?: string;
   createdAt: string;
   searchCriteria?: {
@@ -245,6 +299,8 @@ interface QueuedCandidate {
   jobRequisitionId?: string;
   assessmentTemplateId?: string;
   assessmentUrl?: string;
+  // Error tracking
+  errorMessage?: string;
 }
 
 interface SearchRun {
@@ -318,6 +374,7 @@ export default function SourcingPage() {
   });
   const [parsedCriteria, setParsedCriteria] = useState<ParsedCriteria | null>(null);
   const [searchStrategy, setSearchStrategy] = useState<AISearchStrategy | null>(null);
+  const [skillTaxonomy, setSkillTaxonomy] = useState<SkillTaxonomy | null>(null);
   const [searchRun, setSearchRun] = useState<SearchRun | null>(null);
   const searchRunRef = useRef<SearchRun | null>(null);
   const [maxResults, setMaxResults] = useState(50);
@@ -337,6 +394,7 @@ export default function SourcingPage() {
   const [isEnrichingProfiles, setIsEnrichingProfiles] = useState(false);
   const [aiScoringEnabled, setAiScoringEnabled] = useState(true);
   const [showScoreDetails, setShowScoreDetails] = useState<Set<string>>(new Set());
+  const [expandedLinkedInCandidates, setExpandedLinkedInCandidates] = useState<Set<string>>(new Set());
   const [filterByScore, setFilterByScore] = useState<'all' | 'qualified' | 'borderline' | 'unqualified'>('all');
   const [isHydrated, setIsHydrated] = useState(false);
   const [lastSearchQuery, setLastSearchQuery] = useState<{
@@ -371,6 +429,40 @@ export default function SourcingPage() {
   const [expandedGithubCandidates, setExpandedGithubCandidates] = useState<Set<string>>(new Set());
   const [githubCandidateScores, setGithubCandidateScores] = useState<Map<string, GitHubCandidateScore>>(new Map());
   const [filterLinkedInOnly, setFilterLinkedInOnly] = useState(false);
+
+  // Express Mode State - Automated pipeline from JD parse to queue
+  const [expressMode, setExpressMode] = useState(false);
+  const [isRunningExpressMode, setIsRunningExpressMode] = useState(false);
+  const [expressModeStep, setExpressModeStep] = useState<'idle' | 'parsing' | 'searching' | 'enriching' | 'scoring' | 'queuing' | 'sending' | 'complete'>('idle');
+  const [expressModeProgress, setExpressModeProgress] = useState(0);
+  const [showExpressCompleteModal, setShowExpressCompleteModal] = useState(false);
+  const [expressAutoSend, setExpressAutoSend] = useState(false); // Auto-send connection requests in Express Mode
+  const [expressMessageType, setExpressMessageType] = useState<'connection_only' | 'connection_request'>('connection_only'); // Message type for Express Mode
+  const [expressModeResults, setExpressModeResults] = useState<{
+    totalFound: number;
+    enriched: number;
+    scored: number;
+    queued: number;
+    sent: number;
+    failed: number;
+    queuedCandidates: SourcedCandidate[];
+  } | null>(null);
+
+  // Human-like outreach timing state
+  const [showOutreachProgress, setShowOutreachProgress] = useState(false);
+  const [outreachProgress, setOutreachProgress] = useState<OutreachProgress>({
+    current: 0,
+    total: 0,
+    status: 'waiting',
+    statusMessage: '',
+    remainingMs: 0,
+    isBreak: false,
+    successCount: 0,
+    failureCount: 0,
+    errors: [],
+  });
+  const outreachCancelledRef = useRef(false);
+  const timingConfig: HumanLikeTimingConfig = TIMING_PROFILES.moderate;
 
   // Company Research State
   const [autoResearchEnabled, setAutoResearchEnabled] = useState(false);
@@ -782,6 +874,68 @@ export default function SourcingPage() {
       minRepos: minRepos,
     });
     setGithubKeywordSource('basic');
+  };
+
+  // Extract skill terms from a Boolean query string
+  // This is used to ensure scoring only considers skills that were actually searched for
+  const extractSkillsFromBooleanQuery = (booleanQuery: string | undefined): string[] => {
+    if (!booleanQuery) return [];
+
+    // Remove Boolean operators and parentheses
+    const cleaned = booleanQuery
+      .replace(/\bAND\b/gi, ' ')
+      .replace(/\bOR\b/gi, ' ')
+      .replace(/\bNOT\b/gi, ' ')
+      .replace(/[()]/g, ' ')
+      .replace(/"/g, '')  // Remove quotes
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    // Split into individual terms and filter
+    const terms = cleaned.split(' ')
+      .map(t => t.trim())
+      .filter(t => {
+        // Filter out:
+        // - Empty strings
+        // - Very short terms (likely noise)
+        // - Common non-skill words
+        const lowerT = t.toLowerCase();
+        const skipWords = ['the', 'and', 'for', 'with', 'years', 'experience', 'senior', 'junior', 'mid', 'level', 'engineer', 'developer', 'manager', 'lead', 'principal', 'staff'];
+        return t.length > 1 && !skipWords.includes(lowerT);
+      });
+
+    // Return unique terms
+    return [...new Set(terms)];
+  };
+
+  // Augment a Boolean query with contract-related title variants
+  // This helps surface candidates with contract experience without excluding non-contract candidates
+  const augmentQueryWithContractVariants = (query: string): string => {
+    // Contract-related title modifiers to add as OR expansions
+    const contractKeywords = [
+      'Contractor',
+      'Consultant',
+      'Freelance',
+      'Contract',
+      'Independent',
+    ];
+
+    // Try to find the title group in the query (first parenthesized OR group)
+    // Pattern: ("Title 1" OR "Title 2" OR ...)
+    const titleGroupMatch = query.match(/^\(([^)]+)\)/);
+
+    if (titleGroupMatch) {
+      const titleGroup = titleGroupMatch[1];
+      // Add contract keywords as additional OR options
+      const contractAdditions = contractKeywords.map(k => `"${k}"`).join(' OR ');
+      const enhancedTitleGroup = `(${titleGroup} OR ${contractAdditions})`;
+      return query.replace(titleGroupMatch[0], enhancedTitleGroup);
+    }
+
+    // If no title group found, append contract keywords at the end as an OR group
+    // This is less ideal but ensures contract keywords are included
+    const contractGroup = `(${contractKeywords.map(k => `"${k}"`).join(' OR ')})`;
+    return `${query} OR ${contractGroup}`;
   };
 
   // Score a GitHub candidate against search criteria using 4 pillars
@@ -1363,6 +1517,7 @@ export default function SourcingPage() {
       // Clear the search strategy and parsed criteria when JD changes
       setParsedCriteria(null);
       setSearchStrategy(null);
+      setSkillTaxonomy(null);
       setEditableBooleanQuery('');
       setIsBooleanQueryValid(true);
     }
@@ -1592,6 +1747,421 @@ export default function SourcingPage() {
     }
   };
 
+  // Auto-send connection requests for Express Mode with human-like timing
+  // messageType: 'connection_only' (no message) or 'connection_request' (with AI message)
+  // Returns { sent, failed } counts
+  const autoSendConnectionRequests = async (
+    queueItemIds: string[],
+    messageType: 'connection_only' | 'connection_request' = 'connection_only'
+  ): Promise<{ sent: number; failed: number }> => {
+    if (!unipileConfig) {
+      console.error('[Express Mode] Cannot send: LinkedIn not connected');
+      return { sent: 0, failed: queueItemIds.length };
+    }
+
+    // Check daily limit before starting
+    if (!canSendConnection(timingConfig)) {
+      const remaining = getRemainingAllowance(timingConfig);
+      setSearchError(`Daily connection limit reached (${timingConfig.dailyConnectionLimit}). ${remaining.connections} remaining for today.`);
+      return { sent: 0, failed: queueItemIds.length };
+    }
+
+    const apiUrl = `https://${unipileConfig.dsn}.unipile.com:${unipileConfig.port}/api/v1`;
+    let sent = 0;
+    let failed = 0;
+    let lastBreakAt = 0;
+    const errors: Array<{ candidateName: string; error: string }> = [];
+
+    // Get current queue from localStorage
+    const queue: QueuedCandidate[] = JSON.parse(localStorage.getItem('riley_messaging_queue') || '[]');
+    const itemsToSend = queue.filter(item => queueItemIds.includes(item.id) && item.providerId);
+
+    // Check if we have enough daily allowance
+    const remainingAllowance = getRemainingAllowance(timingConfig);
+    const actualToSend = Math.min(itemsToSend.length, remainingAllowance.connections);
+
+    if (actualToSend < itemsToSend.length) {
+      console.warn(`[Express Mode] Only sending ${actualToSend} of ${itemsToSend.length} due to daily limit`);
+    }
+
+    const itemsToProcess = itemsToSend.slice(0, actualToSend);
+
+    const messageTypeLabel = messageType === 'connection_only' ? 'no message' : 'with message';
+    console.log(`[Express Mode] Auto-sending ${itemsToProcess.length} connection requests (${messageTypeLabel}) with human-like timing...`);
+
+    // Show the progress modal
+    outreachCancelledRef.current = false;
+    setOutreachProgress({
+      current: 0,
+      total: itemsToProcess.length,
+      status: 'waiting',
+      statusMessage: 'Starting outreach...',
+      remainingMs: 0,
+      isBreak: false,
+      successCount: 0,
+      failureCount: 0,
+      errors: [],
+    });
+    setShowOutreachProgress(true);
+
+    for (let i = 0; i < itemsToProcess.length; i++) {
+      const item = itemsToProcess[i];
+
+      // Check if cancelled
+      if (outreachCancelledRef.current) {
+        console.log('[Express Mode] Outreach cancelled by user');
+        setOutreachProgress(prev => ({
+          ...prev,
+          status: 'cancelled',
+          statusMessage: 'Outreach cancelled by user',
+        }));
+        break;
+      }
+
+      // Human-like delay before sending (except first message)
+      if (i > 0) {
+        const delayResult = await humanLikeDelay(
+          sent + failed,
+          timingConfig,
+          lastBreakAt,
+          (status, remainingMs, isBreak) => {
+            setOutreachProgress(prev => ({
+              ...prev,
+              status: isBreak ? 'break' : 'waiting',
+              statusMessage: status,
+              remainingMs,
+              isBreak,
+            }));
+          },
+          () => outreachCancelledRef.current
+        );
+
+        if (delayResult.cancelled) {
+          console.log('[Express Mode] Outreach cancelled during delay');
+          setOutreachProgress(prev => ({
+            ...prev,
+            status: 'cancelled',
+            statusMessage: 'Outreach cancelled by user',
+          }));
+          break;
+        }
+
+        if (delayResult.tookBreak) {
+          lastBreakAt = sent + failed;
+        }
+      }
+
+      // Update progress to show sending
+      setOutreachProgress(prev => ({
+        ...prev,
+        current: i + 1,
+        status: 'sending',
+        statusMessage: `Sending to ${item.name}...`,
+        currentCandidateName: item.name,
+        remainingMs: 0,
+        isBreak: false,
+      }));
+
+      try {
+        // Build request body - include message if connection_request type
+        const requestBody: Record<string, string> = {
+          provider_id: item.providerId!,
+          account_id: unipileConfig.accountId,
+        };
+
+        // If connection_request, include the AI-generated message (or a default one)
+        if (messageType === 'connection_request' && item.messageDraft) {
+          requestBody.message = item.messageDraft;
+        }
+
+        const response = await fetch(`${apiUrl}/users/invite`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-API-KEY': unipileConfig.apiKey,
+          },
+          body: JSON.stringify(requestBody),
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error(`[Express Mode] Failed to send to ${item.name}: ${response.status} - ${errorText}`);
+
+          // Update queue item status to failed
+          const updatedQueue = JSON.parse(localStorage.getItem('riley_messaging_queue') || '[]') as QueuedCandidate[];
+          const updated = updatedQueue.map(q =>
+            q.id === item.id ? { ...q, status: 'failed' as const, errorMessage: errorText } : q
+          );
+          localStorage.setItem('riley_messaging_queue', JSON.stringify(updated));
+
+          failed++;
+          errors.push({ candidateName: item.name, error: errorText });
+          setOutreachProgress(prev => ({
+            ...prev,
+            failureCount: failed,
+            errors: [...errors],
+          }));
+          continue;
+        }
+
+        console.log(`[Express Mode] Connection request (${messageTypeLabel}) sent to ${item.name}`);
+
+        // Create outreach tracker
+        try {
+          await fetch(`${API_BASE}/api/outreach/track`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              candidateProviderId: item.providerId,
+              candidateName: item.name,
+              candidateProfileUrl: item.profileUrl,
+              outreachType: messageType === 'connection_only' ? 'CONNECTION_ONLY' : 'CONNECTION_REQUEST',
+              messageContent: messageType === 'connection_request' ? item.messageDraft : undefined,
+              jobRequisitionId: item.jobRequisitionId,
+              jobTitle: item.searchCriteria?.jobTitle,
+              assessmentTemplateId: item.assessmentTemplateId,
+              sourceQueueItemId: item.id,
+            }),
+          });
+        } catch (trackerErr) {
+          console.warn('[Express Mode] Failed to create outreach tracker:', trackerErr);
+        }
+
+        // Update queue item status to sent
+        const updatedQueue = JSON.parse(localStorage.getItem('riley_messaging_queue') || '[]') as QueuedCandidate[];
+        const updated = updatedQueue.map(q =>
+          q.id === item.id ? { ...q, status: 'sent' as const, messageType: messageType } : q
+        );
+        localStorage.setItem('riley_messaging_queue', JSON.stringify(updated));
+
+        sent++;
+
+        // Update daily stats
+        incrementConnectionCount(1);
+
+        // Update progress
+        setOutreachProgress(prev => ({
+          ...prev,
+          successCount: sent,
+        }));
+
+      } catch (err) {
+        console.error(`[Express Mode] Error sending to ${item.name}:`, err);
+        failed++;
+        errors.push({ candidateName: item.name, error: err instanceof Error ? err.message : 'Unknown error' });
+        setOutreachProgress(prev => ({
+          ...prev,
+          failureCount: failed,
+          errors: [...errors],
+        }));
+      }
+    }
+
+    // Count items that couldn't be sent (no providerId)
+    const skipped = queueItemIds.length - itemsToSend.length;
+    if (skipped > 0) {
+      console.warn(`[Express Mode] Skipped ${skipped} candidates (missing LinkedIn provider ID)`);
+      failed += skipped;
+    }
+
+    // Also count items skipped due to daily limit
+    const limitSkipped = itemsToSend.length - actualToSend;
+    if (limitSkipped > 0) {
+      console.warn(`[Express Mode] Skipped ${limitSkipped} candidates due to daily limit`);
+      failed += limitSkipped;
+    }
+
+    // Update final status
+    if (!outreachCancelledRef.current) {
+      setOutreachProgress(prev => ({
+        ...prev,
+        status: 'complete',
+        statusMessage: `Sent ${sent} connection requests, ${failed} failed`,
+        currentCandidateName: undefined,
+      }));
+    }
+
+    console.log(`[Express Mode] Auto-send complete: ${sent} sent, ${failed} failed`);
+    return { sent, failed };
+  };
+
+  // Express Mode - Automated pipeline from JD parse to queue and send
+  // Runs: Parse JD -> Search LinkedIn -> Enrich Profiles -> Score -> Auto-queue -> Auto-send
+  const runExpressMode = async () => {
+    if (!customJD.title || !customJD.description) {
+      setSearchError('Please enter a job title and description first');
+      return;
+    }
+
+    if (!unipileConfig) {
+      setSearchError('LinkedIn is not connected. Please connect in Settings first to use Express Mode.');
+      return;
+    }
+
+    console.log('[Express Mode] Starting automated pipeline...');
+    setIsRunningExpressMode(true);
+    setExpressModeStep('parsing');
+    setExpressModeProgress(5);
+    setSearchError(null);
+
+    try {
+      // Step 1: Parse Job Description
+      console.log('[Express Mode] Step 1: Parsing JD...');
+      setExpressModeStep('parsing');
+      setExpressModeProgress(10);
+
+      // Get parsed criteria directly instead of relying on state
+      const parseResult = await parseJobDescription();
+
+      if (!parseResult) {
+        console.log('[Express Mode] Failed to parse job description');
+        setSearchError('Failed to parse job description. Please try again.');
+        setIsRunningExpressMode(false);
+        setExpressModeStep('idle');
+        return;
+      }
+
+      console.log('[Express Mode] Parsed criteria:', parseResult.criteria.titles, parseResult.criteria.requiredSkills);
+      setExpressModeProgress(20);
+
+      // Step 2: Search LinkedIn
+      console.log('[Express Mode] Step 2: Searching LinkedIn...');
+      setExpressModeStep('searching');
+      setExpressModeProgress(25);
+
+      // Pass criteria and strategy directly to avoid state timing issues
+      await searchUnipile({ criteria: parseResult.criteria, strategy: parseResult.strategy });
+
+      // Wait for search to complete and state to update
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      // Check if search found candidates
+      const currentSearchRun = searchRunRef.current;
+      if (!currentSearchRun || currentSearchRun.candidates.length === 0) {
+        console.log('[Express Mode] No candidates found from search');
+        setSearchError('No candidates found. Try adjusting your search criteria.');
+        setIsRunningExpressMode(false);
+        setExpressModeStep('idle');
+        return;
+      }
+
+      console.log(`[Express Mode] Found ${currentSearchRun.candidates.length} candidates`);
+      setExpressModeProgress(45);
+
+      // Step 3: Enrich Profiles (skip if not needed)
+      console.log('[Express Mode] Step 3: Enriching profiles...');
+      setExpressModeStep('enriching');
+      setExpressModeProgress(50);
+
+      // Enrich all profiles - this also triggers scoring via autoRescore=true
+      const candidatesToEnrich = currentSearchRun.candidates.filter(c => c.providerId && !c.isProfileEnriched);
+      if (candidatesToEnrich.length > 0) {
+        // Call enrichAllProfiles but with autoRescore=false since we'll score separately
+        await enrichAllProfiles(currentSearchRun.candidates, false);
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+
+      setExpressModeProgress(65);
+
+      // Step 4: AI Scoring
+      console.log('[Express Mode] Step 4: Running AI scoring...');
+      setExpressModeStep('scoring');
+      setExpressModeProgress(70);
+
+      await runAiScoring();
+
+      // Wait for scoring to complete
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      setExpressModeProgress(85);
+
+      // Step 5: Auto-queue candidates with score >= 60
+      console.log('[Express Mode] Step 5: Auto-queuing qualified candidates...');
+      setExpressModeStep('queuing');
+      setExpressModeProgress(90);
+
+      // Get latest candidates with scores from ref
+      const scoredSearchRun = searchRunRef.current;
+      if (!scoredSearchRun) {
+        throw new Error('Search run state lost');
+      }
+
+      // Filter candidates with score >= 60 and status 'new'
+      const qualifiedCandidates = scoredSearchRun.candidates.filter(c => {
+        const score = c.sourcingScore?.overallScore ?? c.relevanceScore ?? 0;
+        return score >= 60 && c.status === 'new';
+      });
+
+      console.log(`[Express Mode] ${qualifiedCandidates.length} candidates qualify for queue (score >= 60)`);
+
+      let queuedCount = 0;
+      let queueItemIds: string[] = [];
+      if (qualifiedCandidates.length > 0) {
+        // Queue the qualified candidates
+        await addToQueue(qualifiedCandidates);
+        queuedCount = qualifiedCandidates.length;
+
+        // Get the queue item IDs we just created
+        const queue: QueuedCandidate[] = JSON.parse(localStorage.getItem('riley_messaging_queue') || '[]');
+        queueItemIds = qualifiedCandidates
+          .map(c => queue.find(q => q.candidateId === c.id && q.status === 'pending')?.id)
+          .filter((id): id is string => !!id);
+      }
+
+      setExpressModeProgress(92);
+
+      // Step 6: Auto-send connection requests (optional - based on expressAutoSend setting)
+      let sentCount = 0;
+      let failedCount = 0;
+
+      if (expressAutoSend && queueItemIds.length > 0) {
+        console.log(`[Express Mode] Step 6: Auto-sending connection requests (${expressMessageType})...`);
+        setExpressModeStep('sending');
+        setExpressModeProgress(95);
+
+        const sendResults = await autoSendConnectionRequests(queueItemIds, expressMessageType);
+        sentCount = sendResults.sent;
+        failedCount = sendResults.failed;
+      } else if (!expressAutoSend) {
+        console.log('[Express Mode] Step 6: Skipping auto-send (disabled)');
+      }
+
+      setExpressModeProgress(100);
+
+      // Store results for the modal
+      const results = {
+        totalFound: scoredSearchRun.candidates.length,
+        enriched: scoredSearchRun.candidates.filter(c => c.isProfileEnriched).length,
+        scored: scoredSearchRun.candidates.filter(c => c.sourcingScore).length,
+        queued: queuedCount,
+        sent: sentCount,
+        failed: failedCount,
+        queuedCandidates: qualifiedCandidates,
+      };
+      setExpressModeResults(results);
+
+      console.log('[Express Mode] Pipeline complete!', results);
+
+      // Show completion modal
+      setExpressModeStep('complete');
+      setShowExpressCompleteModal(true);
+
+      // Log activity
+      const activityMessage = expressAutoSend
+        ? `Automated sourcing complete: ${results.totalFound} found, ${results.sent} connection requests sent`
+        : `Automated sourcing complete: ${results.totalFound} found, ${results.queued} queued for review`;
+      logActivity('Express Mode', activityMessage);
+
+    } catch (error) {
+      console.error('[Express Mode] Pipeline failed:', error);
+      setSearchError(`Express Mode failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      setIsRunningExpressMode(false);
+      setExpressModeStep('idle');
+      setExpressModeProgress(0);
+    }
+  };
+
   const toggleCandidateSelection = (candidateId: string) => {
     setSelectedCandidates(prev => {
       const next = new Set(prev);
@@ -1692,17 +2262,39 @@ export default function SourcingPage() {
             companySize: searchStrategy?.seniorityLevel ? `${searchStrategy.seniorityLevel} level role` : undefined,
             levelContext: searchStrategy?.levelRationale,
             // Technical requirements for the new Technical Fit pillar
-            technical: {
-              mustHave: searchStrategy?.mustHaveSkills || parsedCriteria.requiredSkills,
-              niceToHave: searchStrategy?.niceToHaveSkills || parsedCriteria.preferredSkills,
-              // Infer architecture/scale from search strategy if available
-              architecture: searchStrategy?.leadershipIndicators?.filter(i =>
-                i.toLowerCase().includes('architect') ||
-                i.toLowerCase().includes('scale') ||
-                i.toLowerCase().includes('distributed') ||
-                i.toLowerCase().includes('microservice')
-              ),
-            },
+            // COHERENCE FIX: Use the actual search terms, not full JD skills
+            // This ensures we only score candidates against what was actually searched for
+            technical: (() => {
+              // Extract skills from the actual Boolean query that was used
+              const actualSearchSkills = extractSkillsFromBooleanQuery(lastSearchQuery?.keywords);
+
+              // If we have actual search skills, use those for scoring
+              // Otherwise fall back to JD-extracted skills
+              const mustHaveSkills = actualSearchSkills.length > 0
+                ? actualSearchSkills
+                : (searchStrategy?.mustHaveSkills || parsedCriteria.requiredSkills);
+
+              console.log('[AI Scoring] Technical skill coherence:', {
+                actualSearchQuery: lastSearchQuery?.keywords?.substring(0, 100),
+                extractedFromSearch: actualSearchSkills,
+                usingForScoring: mustHaveSkills,
+                jdMustHave: searchStrategy?.mustHaveSkills,
+              });
+
+              return {
+                mustHave: mustHaveSkills,
+                niceToHave: searchStrategy?.niceToHaveSkills || parsedCriteria.preferredSkills,
+                // Infer architecture/scale from search strategy if available
+                architecture: searchStrategy?.leadershipIndicators?.filter(i =>
+                  i.toLowerCase().includes('architect') ||
+                  i.toLowerCase().includes('scale') ||
+                  i.toLowerCase().includes('distributed') ||
+                  i.toLowerCase().includes('microservice')
+                ),
+                // Include the actual search query for context
+                searchQueryUsed: lastSearchQuery?.keywords,
+              };
+            })(),
             // Culture fit criteria
             excludeCompanies: customJD.excludeCompanies?.split(',').map(c => c.trim()).filter(Boolean) || undefined,
             targetIndustries: customJD.targetIndustries?.split(',').map(i => i.trim()).filter(Boolean) || undefined,
@@ -2105,6 +2697,19 @@ export default function SourcingPage() {
   // Toggle score details visibility
   const toggleScoreDetails = (candidateId: string) => {
     setShowScoreDetails(prev => {
+      const next = new Set(prev);
+      if (next.has(candidateId)) {
+        next.delete(candidateId);
+      } else {
+        next.add(candidateId);
+      }
+      return next;
+    });
+  };
+
+  // Toggle expanded LinkedIn candidate profile view
+  const toggleExpandedCandidate = (candidateId: string) => {
+    setExpandedLinkedInCandidates(prev => {
       const next = new Set(prev);
       if (next.has(candidateId)) {
         next.delete(candidateId);
@@ -2529,7 +3134,8 @@ export default function SourcingPage() {
     }, 0);
   };
 
-  const parseJobDescription = async () => {
+  // Returns parsed criteria and strategy for Express Mode direct passing
+  const parseJobDescription = async (): Promise<{ criteria: ParsedCriteria; strategy: AISearchStrategy | null } | null> => {
     setIsParsing(true);
     setSearchError(null);
 
@@ -2569,7 +3175,22 @@ export default function SourcingPage() {
         // Set the rich search strategy
         setSearchStrategy(data.strategy);
 
+        // Set skill taxonomy for coherent scoring (only score against what we searched)
+        if (data.skillTaxonomy) {
+          setSkillTaxonomy(data.skillTaxonomy);
+          console.log('[Sourcing] Skill taxonomy extracted:', {
+            core: data.skillTaxonomy.coreCompetency?.skill,
+            critical: data.skillTaxonomy.criticalSkills?.map((s: WeightedSkill) => s.skill),
+            confidence: data.skillTaxonomy.extractionConfidence,
+          });
+        } else {
+          setSkillTaxonomy(null);
+        }
+
         console.log('[Sourcing] AI search strategy generated:', data.aiPowered ? 'AI-powered' : 'Mock', data.strategy);
+
+        // Return for Express Mode direct usage
+        return { criteria: data.parsedCriteria, strategy: data.strategy };
       } else {
         throw new Error('Failed to generate search strategy');
       }
@@ -2589,6 +3210,10 @@ export default function SourcingPage() {
       };
       setParsedCriteria(criteria);
       setSearchStrategy(null);
+      setSkillTaxonomy(null);
+
+      // Return fallback for Express Mode
+      return { criteria, strategy: null };
     } finally {
       setIsParsing(false);
     }
@@ -2609,8 +3234,13 @@ export default function SourcingPage() {
   };
 
   // Real Unipile LinkedIn search
-  const searchUnipile = async () => {
-    if (!unipileConfig || !parsedCriteria) return;
+  // Optional params allow Express Mode to pass criteria directly without waiting for state
+  const searchUnipile = async (params?: { criteria?: ParsedCriteria; strategy?: AISearchStrategy | null }) => {
+    // Use passed params or fall back to state
+    const criteria = params?.criteria || parsedCriteria;
+    const strategyToUse = params?.strategy !== undefined ? params.strategy : searchStrategy;
+
+    if (!unipileConfig || !criteria) return;
 
     setIsSearching(true);
     setSearchError(null);
@@ -2721,83 +3351,104 @@ export default function SourcingPage() {
       };
 
       const buildKeywords = (api: 'classic' | 'sales_navigator' | 'recruiter'): string => {
-        // Priority 1: If user edited the query in the editor, use that
-        if (editableBooleanQuery?.trim() && editableBooleanQuery !== parsedCriteria.booleanQuery) {
-          console.log(`[Sourcing] Using USER-EDITED Boolean query (${editableBooleanQuery.length} chars):`, editableBooleanQuery);
+        // Inner function to build the base query
+        const buildBaseQuery = (): string => {
+          // Priority 1: If user edited the query in the editor, use that
+          if (editableBooleanQuery?.trim() && editableBooleanQuery !== criteria.booleanQuery) {
+            console.log(`[Sourcing] Using USER-EDITED Boolean query (${editableBooleanQuery.length} chars):`, editableBooleanQuery);
+            if (api === 'classic') {
+              return truncateQuery(editableBooleanQuery.trim(), API_KEYWORD_LIMITS.classic);
+            }
+            return editableBooleanQuery.trim();
+          }
+
+          // Priority 2: Use the API-specific query from searchStrategy.searchQueries
+          // These are the "Recommended API Booleans" shown in the UI
+          const apiQuery = strategyToUse?.searchQueries?.find((sq: { api: string; query: string }) => sq.api === api)?.query;
+          if (apiQuery?.trim()) {
+            const trimmedQuery = apiQuery.trim();
+            const apiLimit = API_KEYWORD_LIMITS[api] || 100;
+
+            // Apply truncation if query exceeds API limit
+            if (trimmedQuery.length > apiLimit) {
+              const truncated = truncateQuery(trimmedQuery, apiLimit);
+              console.log(`[Sourcing] Using RECOMMENDED query for ${api.toUpperCase()} API, truncated from ${trimmedQuery.length} to ${truncated.length} chars (limit: ${apiLimit}):`, truncated);
+              return truncated;
+            }
+            console.log(`[Sourcing] Using RECOMMENDED query for ${api.toUpperCase()} API (${trimmedQuery.length} chars, limit: ${apiLimit}):`, trimmedQuery);
+            return trimmedQuery;
+          }
+
+          // Priority 3: Fall back to criteria.booleanQuery (generic query)
+          const booleanQuery = criteria.booleanQuery?.trim();
+          if (booleanQuery) {
+            console.log(`[Sourcing] Using FALLBACK Boolean query from criteria (${booleanQuery.length} chars):`, booleanQuery);
+            if (api === 'classic') {
+              return truncateQuery(booleanQuery, API_KEYWORD_LIMITS.classic);
+            }
+            return booleanQuery;
+          }
+
+          // Fallback: Build simple keywords if no Boolean query available (shouldn't happen normally)
+          console.log('[Sourcing] WARNING: No Boolean query available, falling back to simple keywords');
+          return '';
+        };
+
+        // Build the base query
+        let query = buildBaseQuery();
+
+        // If no base query, use the fallback logic
+        if (!query) {
+          const keywordParts: string[] = [];
+
           if (api === 'classic') {
-            return truncateQuery(editableBooleanQuery.trim(), API_KEYWORD_LIMITS.classic);
+            // CLASSIC API: Keep it short to avoid LinkedIn limits
+            // Use only the first/primary title (most important)
+            if (criteria.titles.length > 0) {
+              keywordParts.push(criteria.titles[0]);
+            }
+
+            // Add only 2-3 key skills to keep query short
+            if (criteria.requiredSkills.length > 0) {
+              keywordParts.push(criteria.requiredSkills.slice(0, 3).join(' '));
+            }
+
+            // Truncate to stay under LinkedIn's limit
+            query = keywordParts.join(' ');
+            if (query.length > 150) {
+              query = query.substring(0, 150).trim();
+            }
+          } else {
+            // RECRUITER/SALES NAVIGATOR: Use full detailed query
+            // Add all titles
+            if (criteria.titles.length > 0) {
+              keywordParts.push(criteria.titles.join(' OR '));
+            }
+
+            // Add all required skills
+            if (criteria.requiredSkills.length > 0) {
+              keywordParts.push(criteria.requiredSkills.join(' '));
+            }
+
+            // Add preferred skills
+            if (criteria.preferredSkills && criteria.preferredSkills.length > 0) {
+              keywordParts.push(criteria.preferredSkills.slice(0, 5).join(' '));
+            }
+
+            query = keywordParts.join(' ');
           }
-          return editableBooleanQuery.trim();
         }
 
-        // Priority 2: Use the API-specific query from searchStrategy.searchQueries
-        // These are the "Recommended API Booleans" shown in the UI
-        const apiQuery = searchStrategy?.searchQueries?.find(sq => sq.api === api)?.query;
-        if (apiQuery?.trim()) {
-          const trimmedQuery = apiQuery.trim();
-          const apiLimit = API_KEYWORD_LIMITS[api] || 100;
-
-          // Apply truncation if query exceeds API limit
-          if (trimmedQuery.length > apiLimit) {
-            const truncated = truncateQuery(trimmedQuery, apiLimit);
-            console.log(`[Sourcing] Using RECOMMENDED query for ${api.toUpperCase()} API, truncated from ${trimmedQuery.length} to ${truncated.length} chars (limit: ${apiLimit}):`, truncated);
-            return truncated;
-          }
-          console.log(`[Sourcing] Using RECOMMENDED query for ${api.toUpperCase()} API (${trimmedQuery.length} chars, limit: ${apiLimit}):`, trimmedQuery);
-          return trimmedQuery;
+        // CONTRACT ROLE ENHANCEMENT: If this is a contract role and we have room,
+        // augment the query with contract-related title variants.
+        // Only apply for non-classic APIs (they have more room) to avoid truncation issues.
+        if (customJD.isContractRole && api !== 'classic' && query) {
+          const augmented = augmentQueryWithContractVariants(query);
+          console.log(`[Sourcing] CONTRACT ROLE: Augmented query with contract variants (${query.length} -> ${augmented.length} chars)`);
+          query = augmented;
         }
 
-        // Priority 3: Fall back to parsedCriteria.booleanQuery (generic query)
-        const booleanQuery = parsedCriteria.booleanQuery?.trim();
-        if (booleanQuery) {
-          console.log(`[Sourcing] Using FALLBACK Boolean query from parsedCriteria (${booleanQuery.length} chars):`, booleanQuery);
-          if (api === 'classic') {
-            return truncateQuery(booleanQuery, API_KEYWORD_LIMITS.classic);
-          }
-          return booleanQuery;
-        }
-
-        // Fallback: Build simple keywords if no Boolean query available (shouldn't happen normally)
-        console.log('[Sourcing] WARNING: No Boolean query available, falling back to simple keywords');
-        const keywordParts: string[] = [];
-
-        if (api === 'classic') {
-          // CLASSIC API: Keep it short to avoid LinkedIn limits
-          // Use only the first/primary title (most important)
-          if (parsedCriteria.titles.length > 0) {
-            keywordParts.push(parsedCriteria.titles[0]);
-          }
-
-          // Add only 2-3 key skills to keep query short
-          if (parsedCriteria.requiredSkills.length > 0) {
-            keywordParts.push(parsedCriteria.requiredSkills.slice(0, 3).join(' '));
-          }
-
-          // Truncate to stay under LinkedIn's limit
-          let keywords = keywordParts.join(' ');
-          if (keywords.length > 150) {
-            keywords = keywords.substring(0, 150).trim();
-          }
-          return keywords;
-        } else {
-          // RECRUITER/SALES NAVIGATOR: Use full detailed query
-          // Add all titles
-          if (parsedCriteria.titles.length > 0) {
-            keywordParts.push(parsedCriteria.titles.join(' OR '));
-          }
-
-          // Add all required skills
-          if (parsedCriteria.requiredSkills.length > 0) {
-            keywordParts.push(parsedCriteria.requiredSkills.join(' '));
-          }
-
-          // Add preferred skills
-          if (parsedCriteria.preferredSkills && parsedCriteria.preferredSkills.length > 0) {
-            keywordParts.push(parsedCriteria.preferredSkills.slice(0, 5).join(' '));
-          }
-
-          return keywordParts.join(' ');
-        }
+        return query;
       };
 
       console.log('[Sourcing] Building keywords for search...');
@@ -2866,7 +3517,7 @@ export default function SourcingPage() {
       let successSearchBody: Record<string, unknown> | null = null;
 
       // Get location from parsed criteria or custom JD
-      const searchLocation = parsedCriteria.locations?.[0] || customJD.location;
+      const searchLocation = criteria.locations?.[0] || customJD.location;
 
       // LinkedIn geo ID for United States
       const US_GEO_ID = '103644278';
@@ -3020,9 +3671,9 @@ export default function SourcingPage() {
         }
 
         // For recruiter API, add advanced role filter
-        if (api === 'recruiter' && parsedCriteria.titles.length > 0) {
+        if (api === 'recruiter' && criteria.titles.length > 0) {
           searchBody.role = [{
-            keywords: parsedCriteria.titles.join(' OR '),
+            keywords: criteria.titles.join(' OR '),
             priority: 'MUST_HAVE',
             scope: 'CURRENT_OR_PAST',
           }];
@@ -3305,7 +3956,7 @@ export default function SourcingPage() {
         progress: 100,
         totalFound: displayedCandidates.length, // Show actual returned count
         candidates: displayedCandidates,
-        criteria: parsedCriteria,
+        criteria: criteria,
       });
 
       // Log search to Riley context for activity awareness
@@ -3357,6 +4008,7 @@ export default function SourcingPage() {
     });
     setParsedCriteria(null);
     setSearchStrategy(null);
+    setSkillTaxonomy(null);
     setSearchRun(null);
     setEditableBooleanQuery('');
     setIsBooleanQueryValid(true);
@@ -4256,18 +4908,108 @@ export default function SourcingPage() {
                 </select>
               </div>
 
-              <button
-                onClick={parseJobDescription}
-                disabled={isParsing || !customJD.title}
-                className="w-full px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
-              >
-                {isParsing ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Sparkles className="h-4 w-4" />
-                )}
-                {isParsing ? 'Parsing...' : 'Parse with AI'}
-              </button>
+              {/* Action Buttons */}
+              <div className="flex gap-2">
+                <button
+                  onClick={parseJobDescription}
+                  disabled={isParsing || isRunningExpressMode || !customJD.title}
+                  className="flex-1 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  {isParsing ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Sparkles className="h-4 w-4" />
+                  )}
+                  {isParsing ? 'Parsing...' : 'Parse'}
+                </button>
+
+                <button
+                  onClick={runExpressMode}
+                  disabled={isRunningExpressMode || isParsing || !customJD.title || !customJD.description || !unipileConfig}
+                  className="flex-1 px-4 py-2 bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-lg hover:from-amber-600 hover:to-orange-600 transition-all disabled:opacity-50 disabled:hover:from-amber-500 disabled:hover:to-orange-500 flex items-center justify-center gap-2 font-medium shadow-sm"
+                  title={!unipileConfig ? 'Connect LinkedIn in Settings to use Express Mode' : 'Automatically parse, search, score, and queue candidates'}
+                >
+                  {isRunningExpressMode ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Zap className="h-4 w-4" />
+                  )}
+                  {isRunningExpressMode ? 'Running...' : 'Express'}
+                </button>
+              </div>
+
+              {/* Express Mode Options */}
+              {unipileConfig && !isRunningExpressMode && (
+                <div className="mt-3 p-3 bg-amber-50 rounded-lg border border-amber-200">
+                  <div className="flex items-center justify-between">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={expressAutoSend}
+                        onChange={(e) => setExpressAutoSend(e.target.checked)}
+                        className="h-4 w-4 rounded border-amber-300 text-amber-600 focus:ring-amber-500"
+                      />
+                      <span className="text-sm font-medium text-amber-800">
+                        Auto-send connection requests
+                      </span>
+                    </label>
+                    {expressAutoSend && (
+                      <select
+                        value={expressMessageType}
+                        onChange={(e) => setExpressMessageType(e.target.value as 'connection_only' | 'connection_request')}
+                        className="text-xs px-2 py-1 border border-amber-300 rounded bg-white text-amber-800 focus:ring-amber-500"
+                      >
+                        <option value="connection_only">No message</option>
+                        <option value="connection_request">With AI message</option>
+                      </select>
+                    )}
+                  </div>
+                  {expressAutoSend && (
+                    <p className="text-xs text-amber-700 mt-2">
+                      {expressMessageType === 'connection_only'
+                        ? '⚡ Connection requests will be sent without a message (faster, less intrusive)'
+                        : '💬 Connection requests will include AI-generated personalized messages'}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* Express Mode Progress Indicator */}
+              {isRunningExpressMode && (
+                <div className="mt-3 p-3 bg-gradient-to-r from-amber-50 to-orange-50 rounded-lg border border-amber-200">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-sm font-medium text-amber-800 flex items-center gap-2">
+                      <Zap className="h-4 w-4 text-amber-600" />
+                      Express Mode Running
+                    </span>
+                    <span className="text-xs text-amber-600">{expressModeProgress}%</span>
+                  </div>
+                  <div className="w-full bg-amber-200 rounded-full h-2 mb-2">
+                    <div
+                      className="bg-gradient-to-r from-amber-500 to-orange-500 h-2 rounded-full transition-all duration-300"
+                      style={{ width: `${expressModeProgress}%` }}
+                    />
+                  </div>
+                  <p className="text-xs text-amber-700">
+                    {expressModeStep === 'parsing' && '🔍 Parsing job description...'}
+                    {expressModeStep === 'searching' && '🔎 Searching LinkedIn...'}
+                    {expressModeStep === 'enriching' && '📊 Enriching profiles...'}
+                    {expressModeStep === 'scoring' && '🤖 AI scoring candidates...'}
+                    {expressModeStep === 'queuing' && '📬 Queuing qualified candidates...'}
+                    {expressModeStep === 'sending' && '📤 Sending connection requests...'}
+                    {expressModeStep === 'complete' && '✅ Pipeline complete!'}
+                  </p>
+                </div>
+              )}
+
+              {!unipileConfig && (
+                <p className="text-xs text-amber-600 text-center">
+                  <a href="/settings" className="text-blue-600 hover:underline">
+                    Connect LinkedIn
+                  </a>{' '}
+                  to enable Express Mode
+                </p>
+              )}
             </div>
           </div>
 
@@ -4381,6 +5123,94 @@ export default function SourcingPage() {
                           {s}
                         </span>
                       ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Skill Taxonomy - Weighted importance for scoring */}
+                {skillTaxonomy && (
+                  <div className="border-t border-gray-100 pt-3 mt-3">
+                    <span className="text-gray-500 text-xs font-medium flex items-center gap-1 mb-2">
+                      <Target className="h-3 w-3" />
+                      Skill Priority (for scoring):
+                    </span>
+
+                    {/* Core Competency - P0 */}
+                    <div className="mb-2">
+                      <div className="flex items-center gap-1 mb-1">
+                        <span className="text-xs font-bold text-red-600">CORE:</span>
+                        <span className="px-2 py-0.5 bg-red-100 text-red-800 rounded text-xs font-bold border border-red-300">
+                          {skillTaxonomy.coreCompetency.skill}
+                        </span>
+                        <span className="text-xs text-gray-500">
+                          ({Math.round(skillTaxonomy.coreCompetency.confidence * 100)}% confident)
+                        </span>
+                      </div>
+                      {skillTaxonomy.coreCompetency.evidence.length > 0 && (
+                        <p className="text-xs text-gray-500 italic ml-4">
+                          {skillTaxonomy.coreCompetency.evidence[0]}
+                        </p>
+                      )}
+                    </div>
+
+                    {/* Critical Skills - P1 */}
+                    {skillTaxonomy.criticalSkills.length > 0 && (
+                      <div className="mb-2">
+                        <span className="text-xs font-medium text-orange-600">Critical (must-have):</span>
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          {skillTaxonomy.criticalSkills.map((s, i) => (
+                            <span
+                              key={i}
+                              className="px-2 py-0.5 bg-orange-100 text-orange-800 rounded text-xs"
+                              title={`Weight: ${s.weight}, Category: ${s.category}`}
+                            >
+                              {s.skill}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Required Skills - P2 */}
+                    {skillTaxonomy.requiredSkills.length > 0 && (
+                      <div className="mb-2">
+                        <span className="text-xs font-medium text-yellow-700">Required:</span>
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          {skillTaxonomy.requiredSkills.slice(0, 6).map((s, i) => (
+                            <span
+                              key={i}
+                              className="px-2 py-0.5 bg-yellow-50 text-yellow-800 rounded text-xs"
+                            >
+                              {s.skill}
+                            </span>
+                          ))}
+                          {skillTaxonomy.requiredSkills.length > 6 && (
+                            <span className="text-xs text-gray-500">
+                              +{skillTaxonomy.requiredSkills.length - 6} more
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Role Classification */}
+                    <div className="mt-2 pt-2 border-t border-gray-100">
+                      <div className="flex flex-wrap gap-1 text-xs">
+                        <span className="px-1.5 py-0.5 bg-gray-100 text-gray-700 rounded">
+                          {skillTaxonomy.roleType.domain}
+                        </span>
+                        <span className="px-1.5 py-0.5 bg-gray-100 text-gray-700 rounded">
+                          {skillTaxonomy.roleType.level}
+                        </span>
+                        {skillTaxonomy.roleType.isManagement && (
+                          <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded">
+                            management
+                          </span>
+                        )}
+                        <span className="ml-auto text-gray-500">
+                          Confidence: {Math.round(skillTaxonomy.extractionConfidence * 100)}%
+                        </span>
+                      </div>
                     </div>
                   </div>
                 )}
@@ -5067,43 +5897,17 @@ export default function SourcingPage() {
                         <div className="flex items-center gap-2">
                           {/* Sourcing Score Badge (new 3-pillar) - prioritize over legacy */}
                           {candidate.sourcingScore ? (
-                            <div className="flex items-center gap-2">
-                              <SourcingScoreCard
-                                score={candidate.sourcingScore}
-                                candidateName={candidate.name}
-                                compact={true}
-                              />
-                              <button
-                                onClick={() => toggleScoreDetails(candidate.id)}
-                                className="p-1 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded"
-                                title="Toggle score details"
-                              >
-                                {showScoreDetails.has(candidate.id) ? (
-                                  <ChevronUp className="h-4 w-4" />
-                                ) : (
-                                  <ChevronDown className="h-4 w-4" />
-                                )}
-                              </button>
-                            </div>
+                            <SourcingScoreCard
+                              score={candidate.sourcingScore}
+                              candidateName={candidate.name}
+                              compact={true}
+                            />
                           ) : candidate.aiScore ? (
-                            <div className="flex items-center gap-2">
-                              <CandidateScoreCard
-                                score={candidate.aiScore}
-                                candidateName={candidate.name}
-                                compact={true}
-                              />
-                              <button
-                                onClick={() => toggleScoreDetails(candidate.id)}
-                                className="p-1 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded"
-                                title="Toggle AI score details"
-                              >
-                                {showScoreDetails.has(candidate.id) ? (
-                                  <ChevronUp className="h-4 w-4" />
-                                ) : (
-                                  <ChevronDown className="h-4 w-4" />
-                                )}
-                              </button>
-                            </div>
+                            <CandidateScoreCard
+                              score={candidate.aiScore}
+                              candidateName={candidate.name}
+                              compact={true}
+                            />
                           ) : (
                             <div className="text-right">
                               <div
@@ -5146,27 +5950,140 @@ export default function SourcingPage() {
                               <Clock className="h-5 w-5" />
                             </button>
                           )}
+                          {/* Expand full details button - shows scoring pillars + enriched profile data */}
+                          {(candidate.isProfileEnriched || candidate.sourcingScore || candidate.aiScore) && (
+                            <button
+                              onClick={() => toggleExpandedCandidate(candidate.id)}
+                              className={`p-1.5 ${candidate.isProfileEnriched ? 'text-green-600 hover:bg-green-50' : 'text-purple-600 hover:bg-purple-50'} rounded`}
+                              title={expandedLinkedInCandidates.has(candidate.id) ? "Collapse details" : "Expand full details (score pillars + profile)"}
+                            >
+                              {expandedLinkedInCandidates.has(candidate.id) ? (
+                                <ChevronUp className="h-5 w-5" />
+                              ) : (
+                                <ChevronDown className="h-5 w-5" />
+                              )}
+                            </button>
+                          )}
                         </div>
                       </div>
                     </div>
 
-                    {/* Expanded Score Details - support both new and legacy */}
-                    {candidate.sourcingScore && showScoreDetails.has(candidate.id) && (
-                      <div className="px-4 pb-4 border-t border-gray-100 pt-3 bg-gray-50">
-                        <SourcingScoreCard
-                          score={candidate.sourcingScore}
-                          candidateName={candidate.name}
-                          showDetails={true}
-                        />
-                      </div>
-                    )}
-                    {candidate.aiScore && !candidate.sourcingScore && showScoreDetails.has(candidate.id) && (
-                      <div className="px-4 pb-4 border-t border-gray-100 pt-3 bg-gray-50">
-                        <CandidateScoreCard
-                          score={candidate.aiScore}
-                          candidateName={candidate.name}
-                          showDetails={true}
-                        />
+                    {/* Expanded Full Details - Scoring Pillars + Enriched Profile */}
+                    {expandedLinkedInCandidates.has(candidate.id) && (
+                      <div className="border-t border-gray-200">
+                        {/* Scoring Pillars Section */}
+                        {candidate.sourcingScore && (
+                          <div className="px-4 py-3 bg-gray-50 border-b border-gray-100">
+                            <SourcingScoreCard
+                              score={candidate.sourcingScore}
+                              candidateName={candidate.name}
+                              showDetails={true}
+                            />
+                          </div>
+                        )}
+                        {candidate.aiScore && !candidate.sourcingScore && (
+                          <div className="px-4 py-3 bg-gray-50 border-b border-gray-100">
+                            <CandidateScoreCard
+                              score={candidate.aiScore}
+                              candidateName={candidate.name}
+                              showDetails={true}
+                            />
+                          </div>
+                        )}
+
+                        {/* Enriched Profile Data Section */}
+                        {candidate.isProfileEnriched && (
+                          <div className="px-4 py-3 bg-green-50/30">
+                            <div className="space-y-4">
+                              {/* Summary / About Section */}
+                              {candidate.summary && (
+                                <div>
+                                  <h5 className="text-sm font-semibold text-gray-700 mb-1 flex items-center gap-1.5">
+                                    <User className="h-4 w-4 text-green-600" />
+                                    About
+                                  </h5>
+                                  <p className="text-sm text-gray-600 whitespace-pre-wrap">{candidate.summary}</p>
+                                </div>
+                              )}
+
+                              {/* Experience Section */}
+                              {candidate.experiences && candidate.experiences.length > 0 && (
+                                <div>
+                                  <h5 className="text-sm font-semibold text-gray-700 mb-2 flex items-center gap-1.5">
+                                    <Briefcase className="h-4 w-4 text-green-600" />
+                                    Experience ({candidate.experiences.length})
+                                  </h5>
+                                  <div className="space-y-2">
+                                    {candidate.experiences.slice(0, 5).map((exp, idx) => (
+                                      <div key={idx} className="flex items-start gap-2 text-sm">
+                                        <div className="w-1.5 h-1.5 rounded-full bg-green-400 mt-2 flex-shrink-0" />
+                                        <div className="flex-1">
+                                          <div className="font-medium text-gray-800">{exp.title}</div>
+                                          <div className="text-gray-600">{exp.company}</div>
+                                          <div className="text-xs text-gray-500">
+                                            {exp.startDate && (
+                                              <>
+                                                {exp.startDate}
+                                                {exp.endDate ? ` – ${exp.endDate}` : exp.isCurrent ? ' – Present' : ''}
+                                              </>
+                                            )}
+                                          </div>
+                                          {exp.description && (
+                                            <p className="text-xs text-gray-500 mt-1 line-clamp-2">{exp.description}</p>
+                                          )}
+                                        </div>
+                                      </div>
+                                    ))}
+                                    {candidate.experiences.length > 5 && (
+                                      <div className="text-xs text-gray-500 italic pl-3">
+                                        +{candidate.experiences.length - 5} more positions
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Skills Section */}
+                              {candidate.skills && candidate.skills.length > 0 && (
+                                <div>
+                                  <h5 className="text-sm font-semibold text-gray-700 mb-2 flex items-center gap-1.5">
+                                    <Code className="h-4 w-4 text-green-600" />
+                                    Skills ({candidate.skills.length})
+                                  </h5>
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {candidate.skills.slice(0, 20).map((skill, idx) => (
+                                      <span
+                                        key={idx}
+                                        className="px-2 py-0.5 bg-green-100 text-green-800 text-xs rounded-full"
+                                      >
+                                        {skill}
+                                      </span>
+                                    ))}
+                                    {candidate.skills.length > 20 && (
+                                      <span className="px-2 py-0.5 bg-gray-100 text-gray-600 text-xs rounded-full">
+                                        +{candidate.skills.length - 20} more
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* No enriched data message */}
+                              {!candidate.summary && (!candidate.experiences || candidate.experiences.length === 0) && (!candidate.skills || candidate.skills.length === 0) && (
+                                <div className="text-sm text-gray-500 italic">
+                                  Profile marked as enriched but no additional data found. The candidate may have limited public information.
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* No data at all message */}
+                        {!candidate.sourcingScore && !candidate.aiScore && !candidate.isProfileEnriched && (
+                          <div className="px-4 py-3 text-sm text-gray-500 italic">
+                            No detailed data available. Run &quot;Enrich All&quot; or &quot;Score with AI&quot; to get more information.
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -5243,6 +6160,156 @@ export default function SourcingPage() {
               >
                 Use First ({locationChoices[0]})
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Human-Like Outreach Progress Modal */}
+      <OutreachProgressModal
+        isOpen={showOutreachProgress}
+        progress={outreachProgress}
+        config={timingConfig}
+        outreachType="connection"
+        onCancel={() => {
+          outreachCancelledRef.current = true;
+        }}
+        onClose={() => {
+          setShowOutreachProgress(false);
+          // Reset progress state
+          setOutreachProgress({
+            current: 0,
+            total: 0,
+            status: 'waiting',
+            statusMessage: '',
+            remainingMs: 0,
+            isBreak: false,
+            successCount: 0,
+            failureCount: 0,
+            errors: [],
+          });
+        }}
+      />
+
+      {/* Express Mode Completion Modal */}
+      {showExpressCompleteModal && expressModeResults && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl max-w-lg w-full mx-4 overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-200 bg-gradient-to-r from-green-50 to-emerald-50">
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                  <CheckCircle className="h-6 w-6 text-green-600" />
+                  Express Mode Complete!
+                </h3>
+                <button
+                  onClick={() => setShowExpressCompleteModal(false)}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+              <p className="text-sm text-gray-600 mt-1">
+                Your automated sourcing pipeline has finished running.
+              </p>
+            </div>
+
+            <div className="p-6">
+              {/* Results Summary */}
+              <div className="grid grid-cols-2 gap-4 mb-6">
+                <div className="bg-blue-50 rounded-lg p-4 text-center">
+                  <div className="text-3xl font-bold text-blue-700">{expressModeResults.totalFound}</div>
+                  <div className="text-sm text-blue-600">Candidates Found</div>
+                </div>
+                <div className="bg-purple-50 rounded-lg p-4 text-center">
+                  <div className="text-3xl font-bold text-purple-700">{expressModeResults.enriched}</div>
+                  <div className="text-sm text-purple-600">Profiles Enriched</div>
+                </div>
+                <div className="bg-amber-50 rounded-lg p-4 text-center">
+                  <div className="text-3xl font-bold text-amber-700">{expressModeResults.scored}</div>
+                  <div className="text-sm text-amber-600">AI Scored</div>
+                </div>
+                {expressModeResults.sent > 0 ? (
+                  <div className="bg-green-50 rounded-lg p-4 text-center">
+                    <div className="text-3xl font-bold text-green-700">{expressModeResults.sent}</div>
+                    <div className="text-sm text-green-600">Connection Requests Sent</div>
+                  </div>
+                ) : (
+                  <div className="bg-green-50 rounded-lg p-4 text-center">
+                    <div className="text-3xl font-bold text-green-700">{expressModeResults.queued}</div>
+                    <div className="text-sm text-green-600">Queued for Outreach</div>
+                  </div>
+                )}
+              </div>
+
+              {/* Failed Sends Warning */}
+              {expressModeResults.failed > 0 && (
+                <div className="mb-4 p-3 bg-red-50 rounded-lg border border-red-200">
+                  <p className="text-sm text-red-800 flex items-center gap-2">
+                    <AlertCircle className="h-4 w-4" />
+                    {expressModeResults.failed} connection request{expressModeResults.failed > 1 ? 's' : ''} failed to send.
+                    Check the queue for details.
+                  </p>
+                </div>
+              )}
+
+              {/* Queued/Sent Candidates Preview */}
+              {expressModeResults.queued > 0 && (
+                <div className="mb-6">
+                  <h4 className="text-sm font-medium text-gray-700 mb-2">
+                    {expressModeResults.sent > 0 ? 'Connection Requests Sent:' : 'Candidates Added to Queue:'}
+                  </h4>
+                  <div className="max-h-32 overflow-y-auto bg-gray-50 rounded-lg p-2 space-y-1">
+                    {expressModeResults.queuedCandidates.slice(0, 5).map((c) => (
+                      <div key={c.id} className="flex items-center justify-between text-sm px-2 py-1">
+                        <span className="font-medium text-gray-900">{c.name}</span>
+                        <span className="text-gray-500">
+                          Score: {c.sourcingScore?.overallScore ?? c.relevanceScore ?? 0}
+                        </span>
+                      </div>
+                    ))}
+                    {expressModeResults.queued > 5 && (
+                      <div className="text-xs text-gray-500 text-center py-1">
+                        +{expressModeResults.queued - 5} more candidates
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {expressModeResults.queued === 0 && (
+                <div className="mb-6 p-4 bg-amber-50 rounded-lg">
+                  <p className="text-sm text-amber-800">
+                    <AlertCircle className="h-4 w-4 inline mr-2" />
+                    No candidates scored 60+ to auto-queue. Review the results below and manually select candidates if needed.
+                  </p>
+                </div>
+              )}
+            </div>
+
+            <div className="px-6 py-4 border-t border-gray-200 bg-gray-50 flex justify-between items-center">
+              <button
+                onClick={() => setShowExpressCompleteModal(false)}
+                className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800"
+              >
+                Review Results
+              </button>
+              {expressModeResults.sent > 0 ? (
+                <a
+                  href="/queue"
+                  className="px-6 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium flex items-center gap-2 transition-colors"
+                >
+                  View Sent Queue
+                  <ArrowRight className="h-4 w-4" />
+                </a>
+              ) : expressModeResults.queued > 0 ? (
+                <a
+                  href="/queue"
+                  className="px-6 py-2.5 bg-green-600 text-white rounded-lg hover:bg-green-700 font-medium flex items-center gap-2 transition-colors"
+                >
+                  Approve Queued Outreach
+                  <ArrowRight className="h-4 w-4" />
+                </a>
+              ) : null}
             </div>
           </div>
         </div>
