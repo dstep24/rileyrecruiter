@@ -68,6 +68,7 @@ interface GitHubCandidate {
   location: string | null;
   company: string | null;
   blog: string | null;
+  linkedinUrl: string | null; // Extracted from bio or blog field
   email: string | null;
   emailSource: 'profile' | 'commits' | null;
   emailConfidence: 'high' | 'medium' | 'low';
@@ -369,6 +370,7 @@ export default function SourcingPage() {
   const [githubKeywordSource, setGithubKeywordSource] = useState<'basic' | 'ai'>('basic');
   const [expandedGithubCandidates, setExpandedGithubCandidates] = useState<Set<string>>(new Set());
   const [githubCandidateScores, setGithubCandidateScores] = useState<Map<string, GitHubCandidateScore>>(new Map());
+  const [filterLinkedInOnly, setFilterLinkedInOnly] = useState(false);
 
   // Company Research State
   const [autoResearchEnabled, setAutoResearchEnabled] = useState(false);
@@ -911,12 +913,18 @@ export default function SourcingPage() {
       contactReasons.push('Marked as hireable');
     }
 
-    // Portfolio/blog
-    if (candidate.blog) {
-      contactScore += 20;
-      contactReasons.push('Has portfolio/blog URL');
+    // LinkedIn profile
+    if (candidate.linkedinUrl) {
+      contactScore += 25;
+      contactReasons.push('LinkedIn profile available');
     } else {
-      contactReasons.push('No portfolio/blog URL');
+      contactReasons.push('No LinkedIn profile found');
+    }
+
+    // Portfolio/blog
+    if (candidate.blog && !candidate.blog.includes('linkedin.com')) {
+      contactScore += 15;
+      contactReasons.push('Has portfolio/blog URL');
     }
 
     // Calculate overall weighted score
@@ -1094,6 +1102,57 @@ export default function SourcingPage() {
           // Combine all repo text for keyword matching
           const repoKeywords = repoTexts.join(' ');
 
+          // Fetch social accounts to find LinkedIn (GitHub's dedicated social accounts API)
+          let linkedinUrl: string | null = null;
+          try {
+            const socialResponse = await fetch(
+              `https://api.github.com/users/${user.login}/social_accounts`,
+              {
+                headers: {
+                  'Authorization': `Bearer ${githubConfig.token}`,
+                  'Accept': 'application/vnd.github+json',
+                  'X-GitHub-Api-Version': '2022-11-28',
+                },
+              }
+            );
+            if (socialResponse.ok) {
+              const socialAccounts = await socialResponse.json();
+              const linkedinAccount = socialAccounts.find(
+                (account: { provider: string; url: string }) =>
+                  account.provider === 'linkedin' || account.url.includes('linkedin.com')
+              );
+              if (linkedinAccount) {
+                linkedinUrl = linkedinAccount.url;
+              }
+            }
+          } catch (socialErr) {
+            console.warn(`[GitHub Search] Failed to fetch social accounts for ${user.login}:`, socialErr);
+          }
+
+          // Fall back to parsing bio/blog if not found in social accounts
+          if (!linkedinUrl) {
+            const extractLinkedInUrl = (bio: string | null, blog: string | null): string | null => {
+              const textToSearch = `${bio || ''} ${blog || ''}`;
+              const linkedinPatterns = [
+                /https?:\/\/(?:www\.)?linkedin\.com\/in\/([a-zA-Z0-9_-]+)\/?/i,
+                /https?:\/\/(?:www\.)?linkedin\.com\/pub\/([a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)*)\/?/i,
+                /(?:^|\s)(?:www\.)?linkedin\.com\/in\/([a-zA-Z0-9_-]+)\/?/i,
+              ];
+              for (const pattern of linkedinPatterns) {
+                const match = textToSearch.match(pattern);
+                if (match) {
+                  const username = match[1];
+                  if (username && !username.includes('/')) {
+                    return `https://www.linkedin.com/in/${username}`;
+                  }
+                  return match[0].trim().startsWith('http') ? match[0].trim() : `https://${match[0].trim()}`;
+                }
+              }
+              return null;
+            };
+            linkedinUrl = extractLinkedInUrl(profile.bio, profile.blog);
+          }
+
           enrichedCandidates.push({
             id: String(profile.id),
             username: profile.login,
@@ -1102,6 +1161,7 @@ export default function SourcingPage() {
             location: profile.location,
             company: profile.company,
             blog: profile.blog,
+            linkedinUrl,
             email: profile.email,
             emailSource: profile.email ? 'profile' : null,
             emailConfidence: profile.email ? 'high' : 'low',
@@ -3631,15 +3691,32 @@ export default function SourcingPage() {
                 <div className="bg-white rounded-lg border border-gray-200 p-4">
                   <div className="flex items-center justify-between mb-4">
                     <h2 className="font-semibold text-gray-900">
-                      {githubCandidates.length} Developers Found
+                      {filterLinkedInOnly
+                        ? `${githubCandidates.filter(c => c.linkedinUrl).length} Developers with LinkedIn`
+                        : `${githubCandidates.length} Developers Found`
+                      }
                     </h2>
-                    <span className="text-sm text-gray-500">
-                      {githubCandidates.filter(c => c.email).length} with emails
-                    </span>
+                    <div className="flex items-center gap-4">
+                      <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={filterLinkedInOnly}
+                          onChange={(e) => setFilterLinkedInOnly(e.target.checked)}
+                          className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                        />
+                        <Linkedin className="h-4 w-4 text-blue-600" />
+                        Only with LinkedIn ({githubCandidates.filter(c => c.linkedinUrl).length})
+                      </label>
+                      <span className="text-sm text-gray-500">
+                        {githubCandidates.filter(c => c.email).length} with emails
+                      </span>
+                    </div>
                   </div>
 
                   <div className="space-y-3">
-                    {githubCandidates.map((candidate) => {
+                    {githubCandidates
+                      .filter(candidate => !filterLinkedInOnly || candidate.linkedinUrl)
+                      .map((candidate) => {
                       // Calculate score for this candidate - parse keywords (space or comma separated)
                       const allKeywords = githubSearchParams.keywords
                         ? githubSearchParams.keywords.split(/[,\s]+/).map(k => k.trim()).filter(k => k.length > 0)
@@ -3798,6 +3875,24 @@ export default function SourcingPage() {
                           {/* Expandable Score Details Section */}
                           {isExpanded && (
                             <div className="border-t border-gray-200 bg-gray-50 p-4">
+                              {/* LinkedIn Profile Link - shown prominently if available */}
+                              {candidate.linkedinUrl && (
+                                <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                                  <div className="flex items-center gap-2">
+                                    <Linkedin className="h-5 w-5 text-blue-600" />
+                                    <a
+                                      href={candidate.linkedinUrl}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="text-sm font-medium text-blue-600 hover:text-blue-800 flex items-center gap-1"
+                                    >
+                                      View LinkedIn Profile
+                                      <ExternalLink className="h-3 w-3" />
+                                    </a>
+                                  </div>
+                                </div>
+                              )}
+
                               <div className="text-sm font-medium text-gray-700 mb-3">
                                 Match Breakdown
                               </div>

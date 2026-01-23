@@ -196,6 +196,28 @@ export class GitHubClient {
   }
 
   /**
+   * Get user's social accounts (LinkedIn, Twitter, etc.)
+   * This fetches from GitHub's dedicated social accounts API
+   */
+  async getSocialAccounts(username: string): Promise<{ provider: string; url: string }[]> {
+    try {
+      const response = await this.octokit.request('GET /users/{username}/social_accounts', {
+        username,
+        headers: {
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+      });
+      return (response.data as Array<{ provider: string; url: string }>).map((account) => ({
+        provider: account.provider,
+        url: account.url,
+      }));
+    } catch (error) {
+      console.warn(`[GitHubClient] Failed to fetch social accounts for ${username}:`, error);
+      return [];
+    }
+  }
+
+  /**
    * Get user's public repositories
    */
   async getRepositories(
@@ -352,6 +374,41 @@ export class GitHubClient {
     );
   }
 
+  /**
+   * Extract LinkedIn URL from bio or blog fields
+   * Checks common LinkedIn URL patterns
+   */
+  private extractLinkedInUrl(bio: string | null, blog: string | null): string | null {
+    const textToSearch = `${bio || ''} ${blog || ''}`;
+
+    // Match various LinkedIn URL patterns
+    const linkedinPatterns = [
+      // Full URLs with various formats
+      /https?:\/\/(?:www\.)?linkedin\.com\/in\/([a-zA-Z0-9_-]+)\/?/i,
+      /https?:\/\/(?:www\.)?linkedin\.com\/pub\/([a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)*)\/?/i,
+      /https?:\/\/(?:www\.)?linkedin\.com\/profile\/view\?id=([a-zA-Z0-9_-]+)/i,
+      // URLs without protocol
+      /(?:^|\s)(?:www\.)?linkedin\.com\/in\/([a-zA-Z0-9_-]+)\/?/i,
+    ];
+
+    for (const pattern of linkedinPatterns) {
+      const match = textToSearch.match(pattern);
+      if (match) {
+        // Normalize to standard format
+        const username = match[1];
+        if (username && !username.includes('/')) {
+          return `https://www.linkedin.com/in/${username}`;
+        }
+        // Return the full matched URL for complex patterns
+        return match[0].trim().startsWith('http')
+          ? match[0].trim()
+          : `https://${match[0].trim()}`;
+      }
+    }
+
+    return null;
+  }
+
   // ===========================================================================
   // ENRICHED CANDIDATE
   // ===========================================================================
@@ -381,6 +438,23 @@ export class GitHubClient {
       }
     }
 
+    // Extract LinkedIn URL - first try GitHub's social accounts API, then fall back to bio/blog parsing
+    let linkedinUrl = null;
+
+    // Try fetching from GitHub's social accounts API (most reliable source)
+    const socialAccounts = await this.getSocialAccounts(username);
+    const linkedinAccount = socialAccounts.find(
+      (account) => account.provider === 'linkedin' || account.url.includes('linkedin.com')
+    );
+    if (linkedinAccount) {
+      linkedinUrl = linkedinAccount.url;
+    }
+
+    // Fall back to parsing bio/blog if not found in social accounts
+    if (!linkedinUrl) {
+      linkedinUrl = this.extractLinkedInUrl(profile.bio, profile.blog);
+    }
+
     return {
       username: profile.login,
       githubUrl: profile.htmlUrl,
@@ -391,6 +465,7 @@ export class GitHubClient {
       company: profile.company,
       blog: profile.blog,
       twitterUsername: profile.twitterUsername,
+      linkedinUrl,
       hireable: profile.hireable,
       followers: profile.followers,
       following: profile.following,

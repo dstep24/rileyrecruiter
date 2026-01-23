@@ -186,6 +186,7 @@ export interface GitHubCandidate {
   company: string | null;
   blog: string | null;
   twitterUsername: string | null;
+  linkedinUrl: string | null; // Extracted from bio or blog field
   hireable: boolean | null;
 
   // Stats
