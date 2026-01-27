@@ -22,7 +22,14 @@ import {
   getEmailExtractor,
   type GitHubCandidate,
 } from '../../integrations/github/index.js';
-import { getAIGitHubKeywordGenerator, generateGitHubKeywordsFallback } from '../../domain/services/AIGitHubKeywordGenerator.js';
+import { getUnipileClient, initializeUnipileClient } from '../../integrations/linkedin/index.js';
+import {
+  getAIGitHubKeywordGenerator,
+  generateGitHubKeywordsFallback,
+  generateRoleProfile,
+  generateRoleProfileFallback,
+  type RoleProfile,
+} from '../../domain/services/AIGitHubKeywordGenerator.js';
 
 const router = Router();
 
@@ -68,6 +75,21 @@ const githubSearchSchema = z.object({
   keywords: z.array(z.string()).optional(),
   maxResults: z.number().int().positive().max(100).default(50),
   extractEmails: z.boolean().default(true),
+});
+
+const resolveLinkedInProfilesSchema = z.object({
+  candidates: z.array(z.object({
+    id: z.string(),
+    linkedinUrl: z.string().url(),
+    name: z.string().optional(),
+  })).max(20), // Limit batch size for rate limiting
+  // Unipile config passed from frontend (stored in localStorage)
+  unipileConfig: z.object({
+    apiKey: z.string(),
+    dsn: z.string(),
+    port: z.string().optional(),
+    accountId: z.string(),
+  }).optional(),
 });
 
 // =============================================================================
@@ -382,6 +404,167 @@ router.post('/github/generate-keywords', async (req, res, next) => {
 });
 
 /**
+ * POST /sourcing/github/role-profile - Generate semantic role profile for title matching
+ *
+ * Riley understands what characteristics define a role and generates a profile
+ * of signals to look for in GitHub bios. This enables semantic matching rather
+ * than naive keyword matching.
+ *
+ * Example: For "Senior Site Reliability Engineer", instead of just matching
+ * "engineer", Riley looks for signals like "sre", "platform", "infrastructure",
+ * "kubernetes", "reliability", "observability", etc.
+ */
+router.post('/github/role-profile', async (req, res, next) => {
+  try {
+    const { jobTitle } = req.body;
+
+    if (!jobTitle || typeof jobTitle !== 'string') {
+      return res.status(400).json({
+        error: 'Job title is required',
+      });
+    }
+
+    console.log('[Sourcing] Generating role profile for:', jobTitle);
+
+    // Try AI generation, fall back to heuristic if AI fails
+    let roleProfile: RoleProfile;
+    try {
+      roleProfile = await generateRoleProfile(jobTitle);
+      console.log('[Sourcing] AI role profile generated:', roleProfile.identityTerms.slice(0, 3));
+    } catch (aiError) {
+      console.warn('[Sourcing] AI role profile generation failed, using fallback:', aiError);
+      roleProfile = generateRoleProfileFallback(jobTitle);
+    }
+
+    res.json({
+      success: true,
+      ...roleProfile,
+    });
+  } catch (error) {
+    console.error('[Sourcing] Role profile generation failed:', error);
+    next(error);
+  }
+});
+
+/**
+ * POST /sourcing/linkedin/resolve-profiles - Resolve LinkedIn URLs to provider IDs
+ *
+ * This endpoint takes GitHub candidates with LinkedIn URLs and resolves them
+ * to full LinkedIn profiles with provider_id (required for messaging via Unipile).
+ *
+ * Used for adding GitHub-sourced candidates to the LinkedIn messaging queue.
+ */
+router.post('/linkedin/resolve-profiles', async (req, res, next) => {
+  try {
+    const { candidates, unipileConfig } = resolveLinkedInProfilesSchema.parse(req.body);
+
+    // Get or initialize Unipile client
+    let client;
+    try {
+      // If config is provided in request body, use it to initialize
+      if (unipileConfig) {
+        client = initializeUnipileClient({
+          apiKey: unipileConfig.apiKey,
+          dsn: unipileConfig.dsn,
+          port: unipileConfig.port,
+          accountId: unipileConfig.accountId,
+        });
+      } else {
+        // Try to get existing singleton instance
+        client = getUnipileClient();
+      }
+    } catch {
+      return res.status(503).json({
+        success: false,
+        error: 'LinkedIn integration not configured',
+        message: 'Unipile client not initialized. Please provide unipileConfig in the request or check UNIPILE_API_KEY, UNIPILE_DSN, and UNIPILE_ACCOUNT_ID.',
+      });
+    }
+
+    console.log(`[Sourcing] Resolving ${candidates.length} LinkedIn profiles from URLs`);
+
+    const resolved: Array<{
+      id: string;
+      providerId: string;
+      name: string;
+      headline?: string;
+      currentTitle?: string;
+      currentCompany?: string;
+      location?: string;
+      profileUrl: string;
+      profilePictureUrl?: string;
+    }> = [];
+
+    const failed: Array<{
+      id: string;
+      name?: string;
+      error: string;
+      linkedinUrl: string;
+    }> = [];
+
+    for (const candidate of candidates) {
+      try {
+        console.log(`[Sourcing] Looking up LinkedIn profile: ${candidate.linkedinUrl}`);
+
+        // Use getProfileByPublicId which handles URL cleaning and lookup
+        const profile = await client.getProfileByPublicId(candidate.linkedinUrl);
+
+        if (profile && profile.provider_id) {
+          resolved.push({
+            id: candidate.id,
+            providerId: profile.provider_id,
+            name: profile.name || `${profile.first_name || ''} ${profile.last_name || ''}`.trim() || candidate.name || 'Unknown',
+            headline: profile.headline,
+            currentTitle: profile.current_title,
+            currentCompany: profile.current_company,
+            location: profile.location,
+            profileUrl: profile.profile_url || candidate.linkedinUrl,
+            profilePictureUrl: profile.profile_picture_url,
+          });
+          console.log(`[Sourcing] Resolved ${candidate.linkedinUrl} -> ${profile.provider_id}`);
+        } else {
+          failed.push({
+            id: candidate.id,
+            name: candidate.name,
+            error: 'Profile not found or no provider_id',
+            linkedinUrl: candidate.linkedinUrl,
+          });
+          console.log(`[Sourcing] Failed to resolve ${candidate.linkedinUrl}: no profile or provider_id`);
+        }
+
+        // Rate limiting delay between lookups
+        await new Promise(r => setTimeout(r, 500));
+
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+        failed.push({
+          id: candidate.id,
+          name: candidate.name,
+          error: errorMsg,
+          linkedinUrl: candidate.linkedinUrl,
+        });
+        console.error(`[Sourcing] Error resolving ${candidate.linkedinUrl}:`, errorMsg);
+      }
+    }
+
+    console.log(`[Sourcing] Profile resolution complete: ${resolved.length} resolved, ${failed.length} failed`);
+
+    res.json({
+      success: true,
+      resolved,
+      failed,
+      summary: {
+        total: candidates.length,
+        resolved: resolved.length,
+        failed: failed.length,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * POST /sourcing/github/search - Search GitHub for developers
  */
 router.post('/github/search', async (req, res, next) => {
@@ -523,6 +706,183 @@ router.delete('/runs/:runId', async (req, res, next) => {
       message: 'Search run deleted',
     });
   } catch (error) {
+    next(error);
+  }
+});
+
+// =============================================================================
+// PROFILE SCORING - Score a single LinkedIn profile against a job
+// =============================================================================
+
+/**
+ * POST /sourcing/score-profile - Score a LinkedIn profile URL against job criteria
+ *
+ * Fetches the profile via Unipile and scores it using the AI sourcing scorer.
+ * Requires the job role parameters to score against.
+ */
+router.post('/score-profile', async (req, res, next) => {
+  try {
+    const {
+      linkedinUrl,
+      role,
+    } = req.body;
+
+    if (!linkedinUrl || typeof linkedinUrl !== 'string') {
+      return res.status(400).json({
+        error: 'linkedinUrl is required',
+      });
+    }
+
+    if (!role || !role.title) {
+      return res.status(400).json({
+        error: 'role object with at least a title is required',
+      });
+    }
+
+    // Get Unipile client
+    const unipileClient = getUnipileClient();
+    if (!unipileClient) {
+      return res.status(503).json({
+        error: 'LinkedIn integration not configured. Please set up Unipile in settings.',
+      });
+    }
+
+    console.log(`[Sourcing] Scoring profile: ${linkedinUrl}`);
+
+    // Fetch the profile via Unipile
+    const profile = await unipileClient.getProfileByPublicId(linkedinUrl);
+
+    if (!profile) {
+      return res.status(404).json({
+        error: 'Could not find LinkedIn profile. Please check the URL is correct.',
+      });
+    }
+
+    console.log(`[Sourcing] Found profile: ${profile.name || profile.first_name} at ${profile.current_company}`);
+
+    // Transform Unipile profile to CandidateInput format
+    const { AISourcingScorer, resetAISourcingScorer } = await import(
+      '../../domain/services/AISourcingScorer.js'
+    );
+
+    // Check for API key - use header or env
+    const headerApiKey = req.headers['x-anthropic-api-key'] as string | undefined;
+    const envApiKey = process.env.ANTHROPIC_API_KEY;
+
+    if (headerApiKey && !envApiKey) {
+      process.env.ANTHROPIC_API_KEY = headerApiKey;
+    }
+
+    // Reset scorer to pick up new API key
+    resetAISourcingScorer();
+    const scorer = new AISourcingScorer();
+
+    // Normalize skills - handle both string[] and {name: string}[] formats
+    const normalizeSkills = (skills: string[] | Array<{ name: string }> | undefined): string[] => {
+      if (!skills) return [];
+      return skills.map((s) => (typeof s === 'string' ? s : s.name));
+    };
+
+    // Transform experiences - handle both formats
+    // Using inline types since Unipile types are complex
+    type ProfileWithExperiences = {
+      experiences?: Array<{
+        title: string;
+        company_name: string;
+        start_date?: string;
+        end_date?: string;
+        is_current?: boolean;
+        description?: string;
+      }>;
+      work_experience?: Array<{
+        position?: string;
+        company?: string;
+        start?: string;
+        end?: string;
+        description?: string;
+      }>;
+    };
+
+    const transformExperiences = (profileData: ProfileWithExperiences) => {
+      // Try the experiences array first (normalized format)
+      if (profileData.experiences && profileData.experiences.length > 0) {
+        return profileData.experiences.map((exp) => ({
+          title: exp.title,
+          company: exp.company_name,
+          startDate: exp.start_date,
+          endDate: exp.end_date,
+          isCurrent: exp.is_current,
+          description: exp.description,
+        }));
+      }
+
+      // Fall back to work_experience (raw API format)
+      if (profileData.work_experience && profileData.work_experience.length > 0) {
+        return profileData.work_experience.map((exp) => ({
+          title: exp.position || 'Unknown',
+          company: exp.company || 'Unknown',
+          startDate: exp.start,
+          endDate: exp.end,
+          isCurrent: !exp.end,
+          description: exp.description,
+        }));
+      }
+
+      return [];
+    };
+
+    const candidateInput = {
+      id: profile.provider_id,
+      name: profile.name || `${profile.first_name || ''} ${profile.last_name || ''}`.trim() || 'Unknown',
+      currentTitle: profile.current_title || profile.headline?.split(' at ')[0] || 'Unknown',
+      currentCompany: profile.current_company || profile.headline?.split(' at ')[1]?.split(' |')[0] || 'Unknown',
+      headline: profile.headline,
+      location: profile.location,
+      summary: profile.summary,
+      experiences: transformExperiences(profile as any),
+      skills: normalizeSkills(profile.skills),
+    };
+
+    // Score the candidate
+    const score = await scorer.scoreCandidate(candidateInput, {
+      title: role.title,
+      companySize: role.companySize,
+      location: role.isFullyRemote ? 'Fully Remote' : (role.location || 'Remote'),
+      levelContext: role.levelContext,
+      industry: role.industry,
+      teamSize: role.teamSize,
+      technical: role.technical,
+      intakeNotes: role.intakeNotes,
+      isFullyRemote: role.isFullyRemote,
+      searchContext: role.searchContext,
+    });
+
+    // Clean up temporary API key
+    if (headerApiKey && !envApiKey) {
+      delete process.env.ANTHROPIC_API_KEY;
+    }
+
+    console.log(`[Sourcing] Profile scored: ${score.overallScore} (${score.recommendation})`);
+
+    res.json({
+      success: true,
+      profile: {
+        id: profile.provider_id,
+        name: candidateInput.name,
+        headline: profile.headline,
+        currentTitle: candidateInput.currentTitle,
+        currentCompany: candidateInput.currentCompany,
+        location: profile.location,
+        profileUrl: profile.profile_url || `https://www.linkedin.com/in/${profile.public_identifier}`,
+        profilePictureUrl: profile.profile_picture_url,
+        summary: profile.summary,
+        experienceCount: candidateInput.experiences?.length || 0,
+        skillCount: candidateInput.skills?.length || 0,
+      },
+      score,
+    });
+  } catch (error) {
+    console.error('[Sourcing] Error scoring profile:', error);
     next(error);
   }
 });

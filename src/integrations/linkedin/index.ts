@@ -13,8 +13,15 @@
  * - Phantombuster (automation)
  */
 
+// Runtime exports (classes and functions)
 export {
   LinkedInClient,
+  initializeLinkedInClient,
+  getLinkedInClient,
+} from './LinkedInClient.js';
+
+// Type-only exports from LinkedInClient
+export type {
   LinkedInConfig,
   RateLimits,
   LinkedInProfile,
@@ -26,12 +33,18 @@ export {
   LinkedInConversation,
   SendMessageRequest,
   ConnectionRequest,
-  initializeLinkedInClient,
-  getLinkedInClient,
 } from './LinkedInClient.js';
 
+// Runtime exports (classes and functions)
 export {
   UnipileClient,
+  unipileToLinkedInProfile,
+  initializeUnipileClient,
+  getUnipileClient,
+} from './UnipileClient.js';
+
+// Type-only exports from UnipileClient
+export type {
   UnipileConfig,
   UnipileSearchParams,
   UnipileSearchResult,
@@ -46,7 +59,4 @@ export {
   UnipileParameterResult,
   UnipileSearchApi,
   UnipileSearchCategory,
-  unipileToLinkedInProfile,
-  initializeUnipileClient,
-  getUnipileClient,
 } from './UnipileClient.js';

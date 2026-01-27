@@ -19,6 +19,7 @@ import { RileyConversationRepository, rileyConversationRepo } from '../repositor
 import { NotificationService, getNotificationService } from './NotificationService.js';
 import { scheduleDelayedPitch } from '../../infrastructure/queue/workers.js';
 import { prisma } from '../../infrastructure/database/prisma.js';
+import { ClaudeClient } from '../../integrations/llm/ClaudeClient.js';
 import type { OutreachTracker } from '../../generated/prisma/index.js';
 import type { CandidateProfile } from './AICandidateScorer.js';
 
@@ -54,8 +55,8 @@ const DEFAULT_CONFIG: PitchSequenceConfig = {
 // =============================================================================
 
 export class PitchSequenceService {
-  private unipileClient: UnipileClient;
-  private outreachGenerator: AIOutreachGenerator;
+  private unipileClient: UnipileClient | null;
+  private outreachGenerator: AIOutreachGenerator | null;
   private outreachTrackerRepo: OutreachTrackerRepository;
   private conversationRepo: RileyConversationRepository;
   private notificationService: NotificationService;
@@ -68,9 +69,38 @@ export class PitchSequenceService {
     conversationRepo?: RileyConversationRepository;
     notificationService?: NotificationService;
     config?: Partial<PitchSequenceConfig>;
+    /** Optional API key for AI generation. If provided, creates a fresh AIOutreachGenerator with this key. */
+    anthropicApiKey?: string;
+    /** Skip AI initialization - use when only sending custom messages that don't need AI */
+    skipAIInit?: boolean;
   }) {
-    this.unipileClient = options?.unipileClient || getUnipileClient();
-    this.outreachGenerator = options?.outreachGenerator || getAIOutreachGenerator();
+    // Try to get the singleton, but don't fail if not initialized
+    try {
+      this.unipileClient = options?.unipileClient || getUnipileClient();
+    } catch {
+      console.warn('[PitchSequenceService] UnipileClient not available - profile enrichment will be skipped');
+      this.unipileClient = null;
+    }
+
+    // Skip AI initialization if requested (useful when only sending custom messages)
+    if (options?.skipAIInit) {
+      this.outreachGenerator = null;
+      console.log('[PitchSequenceService] AI initialization skipped - custom message mode');
+    } else if (options?.anthropicApiKey) {
+      // If an API key is provided, create a custom AIOutreachGenerator with that key
+      const claudeClient = new ClaudeClient({ apiKey: options.anthropicApiKey });
+      this.outreachGenerator = new AIOutreachGenerator(claudeClient);
+      console.log('[PitchSequenceService] Using provided Anthropic API key for AI generation');
+    } else {
+      // Try to get the default generator, but don't fail if API key is missing
+      try {
+        this.outreachGenerator = options?.outreachGenerator || getAIOutreachGenerator();
+      } catch (error) {
+        console.warn('[PitchSequenceService] AIOutreachGenerator not available - AI pitch generation will fail:', error);
+        this.outreachGenerator = null;
+      }
+    }
+
     this.outreachTrackerRepo = options?.outreachTrackerRepo || outreachTrackerRepo;
     this.conversationRepo = options?.conversationRepo || rileyConversationRepo;
     this.notificationService = options?.notificationService || getNotificationService();
@@ -78,18 +108,30 @@ export class PitchSequenceService {
   }
 
   /**
-   * Send the pitch message after connection acceptance
+   * Generate a pitch message preview without sending it
    */
-  async sendPitch(tracker: OutreachTracker): Promise<PitchResult> {
-    console.log('[PitchSequenceService] Sending pitch to:', tracker.candidateName);
+  async generatePitchPreview(tracker: OutreachTracker): Promise<{ success: boolean; message?: string; error?: string }> {
+    console.log('[PitchSequenceService] Generating pitch preview for:', tracker.candidateName);
+
+    // Check if AI generator is available
+    if (!this.outreachGenerator) {
+      return {
+        success: false,
+        error: 'AI pitch generation requires an Anthropic API key. Please configure it in Settings.',
+      };
+    }
 
     try {
-      // 1. Get candidate profile from Unipile for personalization
+      // 1. Get candidate profile from Unipile for personalization (optional)
       let profile: UnipileProfile | null = null;
-      try {
-        profile = await this.unipileClient.getProfile(tracker.candidateProviderId);
-      } catch (error) {
-        console.warn('[PitchSequenceService] Could not fetch profile, using tracker data:', error);
+      if (this.unipileClient) {
+        try {
+          profile = await this.unipileClient.getProfile(tracker.candidateProviderId);
+        } catch (error) {
+          console.warn('[PitchSequenceService] Could not fetch profile, using tracker data:', error);
+        }
+      } else {
+        console.log('[PitchSequenceService] Skipping profile enrichment - UnipileClient not available');
       }
 
       // 2. Get job requisition details if available
@@ -103,15 +145,75 @@ export class PitchSequenceService {
       // 3. Generate AI pitch message
       const pitchMessage = await this.generatePitchMessage(tracker, profile, jobDetails);
 
+      return {
+        success: true,
+        message: pitchMessage,
+      };
+    } catch (error) {
+      console.error('[PitchSequenceService] Failed to generate pitch preview:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error generating pitch',
+      };
+    }
+  }
+
+  /**
+   * Send the pitch message after connection acceptance
+   * @param tracker - The outreach tracker
+   * @param customMessage - Optional custom message to send instead of auto-generated one
+   */
+  async sendPitch(tracker: OutreachTracker, customMessage?: string): Promise<PitchResult> {
+    console.log('[PitchSequenceService] Sending pitch to:', tracker.candidateName, customMessage ? '(custom message)' : '(auto-generated)');
+
+    try {
+      let pitchMessage: string;
+
+      if (customMessage) {
+        // Use the provided custom message
+        pitchMessage = customMessage;
+      } else {
+        // 1. Get candidate profile from Unipile for personalization (optional)
+        let profile: UnipileProfile | null = null;
+        if (this.unipileClient) {
+          try {
+            profile = await this.unipileClient.getProfile(tracker.candidateProviderId);
+          } catch (error) {
+            console.warn('[PitchSequenceService] Could not fetch profile, using tracker data:', error);
+          }
+        } else {
+          console.log('[PitchSequenceService] Skipping profile enrichment - UnipileClient not available');
+        }
+
+        // 2. Get job requisition details if available
+        let jobDetails = null;
+        if (tracker.jobRequisitionId) {
+          jobDetails = await prisma.jobRequisition.findUnique({
+            where: { id: tracker.jobRequisitionId },
+          });
+        }
+
+        // 3. Generate AI pitch message
+        pitchMessage = await this.generatePitchMessage(tracker, profile, jobDetails);
+      }
+
       // 4. Send via LinkedIn (now we're 1st degree connected)
-      const sentMessage = await this.unipileClient.sendMessage(
-        tracker.candidateProviderId,
+      // Use startChat (POST /chats) to initiate a new conversation, not sendMessage
+      // which is for replying in an existing chat (POST /chats/message)
+      if (!this.unipileClient) {
+        return {
+          success: false,
+          error: 'Cannot send pitch - LinkedIn client not initialized. Please check your Unipile configuration.',
+        };
+      }
+      const chatResult = await this.unipileClient.startChat(
+        [tracker.candidateProviderId],
         pitchMessage
       );
 
       // 5. Create RileyConversation record
       const conversation = await this.conversationRepo.createFromOutreach({
-        chatId: sentMessage.chat_id || `pitch_${tracker.id}_${Date.now()}`,
+        chatId: chatResult.chat_id || `pitch_${tracker.id}_${Date.now()}`,
         candidateProviderId: tracker.candidateProviderId,
         candidateName: tracker.candidateName || undefined,
         candidateProfileUrl: tracker.candidateProfileUrl || undefined,
@@ -142,7 +244,7 @@ export class PitchSequenceService {
       return {
         success: true,
         conversationId: conversation.id,
-        messageId: sentMessage.id,
+        messageId: chatResult.message?.id,
       };
     } catch (error) {
       console.error('[PitchSequenceService] Failed to send pitch:', error);
@@ -161,6 +263,11 @@ export class PitchSequenceService {
     profile: UnipileProfile | null,
     jobDetails: { title: string; description: string; requirements?: unknown } | null
   ): Promise<string> {
+    // Ensure AI generator is available
+    if (!this.outreachGenerator) {
+      throw new Error('AI pitch generation requires an Anthropic API key. Please configure it in Settings.');
+    }
+
     // Build candidate profile for the generator
     const candidateProfile: CandidateProfile = {
       id: tracker.candidateProviderId,
@@ -263,6 +370,12 @@ export class PitchSequenceService {
       return;
     }
 
+    // Ensure AI generator is available for follow-up generation
+    if (!this.outreachGenerator) {
+      console.warn('[PitchSequenceService] Cannot send follow-up - AI generator not available');
+      return;
+    }
+
     // Generate follow-up message
     const originalMessage = conversation.messages?.[0]?.content || tracker.messageContent || '';
     const daysSince = Math.floor(
@@ -283,6 +396,12 @@ export class PitchSequenceService {
       createDefaultGuidelines(),
       'linkedin_connection'
     );
+
+    // Ensure LinkedIn client is available for sending
+    if (!this.unipileClient) {
+      console.warn('[PitchSequenceService] Cannot send follow-up - UnipileClient not available');
+      return;
+    }
 
     // Send the follow-up
     const sentMessage = await this.unipileClient.sendMessage(

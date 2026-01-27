@@ -32,6 +32,18 @@ export interface AIQueryGeneratorInput {
   intakeNotes?: string;
   /** If true, this is a fully remote role - skip location filtering */
   isFullyRemote?: boolean;
+  /**
+   * Search context for intelligent query generation.
+   * Free-form context about the hiring situation that helps generate smarter searches.
+   * Examples:
+   * - "Legacy enterprise company, below-market comp, avoid FAANG candidates"
+   * - "Insurance/banking industry, looking for modernization experience"
+   * - "Startup culture, need risk-takers with equity experience"
+   *
+   * This context should influence the search query itself, not just scoring.
+   * For example, adding industry terms or transformation keywords to the search.
+   */
+  searchContext?: string;
 }
 
 export interface AISearchStrategy {
@@ -91,6 +103,42 @@ const QUERY_GENERATION_SYSTEM_PROMPT = `You are an expert technical recruiter cr
 
 Your job is to analyze a job description and create a comprehensive search strategy that will find qualified candidates while filtering out unqualified ones.
 
+CRITICAL: SEARCH CONTEXT INTELLIGENCE
+When a search context is provided, it contains crucial intelligence that MUST influence your search queries.
+
+YOU MUST EXPAND AND INFER beyond the literal context. Use your expert knowledge to derive related signals:
+
+1. **Industry Context** → EXPAND to related industries with similar characteristics
+   - "insurance/banking" → Also include: healthcare, financial services, credit union, mortgage, pension, actuarial, regulated, compliance, government
+   - "legacy enterprise" → Also include: Fortune 500, enterprise, corporate, established, traditional
+   - "fintech startup" → Also include: neobank, payments, crypto, DeFi, Series A/B/C
+
+2. **Technology Stack Signals** → INFER the ecosystem
+   - ".NET legacy stack" → Also: C#, SQL Server, Windows, Azure, SSIS, SSRS, Entity Framework
+   - "modernizing legacy" → Also: migration, refactoring, microservices, cloud-native, containerization, technical debt
+   - "mainframe" → Also: COBOL, DB2, AS/400, legacy systems, modernization, replatforming
+
+3. **Company Type Pattern Recognition** → DERIVE similar company types
+   - "Legacy enterprise" companies share patterns: long-tenured employees, regulated industries, risk-averse culture
+   - Look for candidates from: insurance carriers, regional banks, healthcare payers, utilities, telecom, manufacturing
+   - These candidates understand: change management, stakeholder buy-in, compliance, waterfall-to-agile transformation
+
+4. **Compensation Reality** → AUTO-EXCLUDE high-comp companies when context suggests below-market
+   - "Below-market comp" or specific salary ranges < $200K → Add to excludeCompanies: Google, Meta, Netflix, Apple, Amazon, Microsoft, Stripe, Uber, Airbnb, Coinbase, etc.
+   - Candidates from these companies typically won't accept 40-60% pay cuts
+
+5. **Transformation Expertise** → When modernization is mentioned, ADD transformation keywords
+   - "modernize old legacy tech" → Include: modernization, migration, transformation, replatforming, cloud migration, legacy, technical debt, refactoring
+   - These are HIGHLY valuable signals - someone who's done this before at a similar company is gold
+
+IMPORTANT: BE CREATIVE with industry expansion. Your job is to think like an expert recruiter who knows:
+- Which industries have similar tech debt problems
+- Which company types share cultural DNA
+- What keywords successful candidates from these backgrounds would have on their profiles
+
+Example: Context says "insurance, banking, legacy .NET"
+Your queries should include: (insurance OR banking OR "financial services" OR healthcare OR "credit union" OR enterprise) AND (modernization OR migration OR ".NET" OR "legacy systems" OR transformation)
+
 CRITICAL SENIORITY MAPPING:
 - IC (Individual Contributor): Engineer, Developer, Designer, Analyst - does technical work
 - Lead: Tech Lead, Team Lead, Principal - small team guidance, still hands-on
@@ -143,6 +191,23 @@ ${input.intakeNotes}
 ---
 ` : '';
 
+  // Build search context section if provided - influences query generation
+  const searchContextSection = input.searchContext ? `
+### 🧠 SEARCH CONTEXT (MUST INFLUENCE YOUR QUERIES)
+The recruiter has provided strategic context about this hiring situation. Use this to generate SMARTER QUERIES:
+
+${input.searchContext}
+
+**How to apply this context to your search queries:**
+- If industries are mentioned (insurance, banking, fintech), ADD those industry terms to your Boolean queries
+- If modernization/transformation is mentioned, ADD keywords like "modernization", "migration", "legacy"
+- If specific company types are preferred (enterprise, startup), ADD those terms to queries
+- If companies should be avoided (FAANG for below-market roles), ADD them to excludeCompanies
+- Think about what keywords someone at the RIGHT type of company would have on their profile
+
+---
+` : '';
+
   // Build the remote work indicator
   const remoteIndicator = input.isFullyRemote
     ? '\n**🌍 FULLY REMOTE ROLE** - Location is not a factor. Search for the best candidates regardless of where they are located.\n'
@@ -154,7 +219,7 @@ ${input.intakeNotes}
 Title: ${input.title}
 Location: ${input.isFullyRemote ? 'FULLY REMOTE (location not a factor)' : (input.location || 'Not specified')}
 ${remoteIndicator}
-${intakeNotesSection}
+${intakeNotesSection}${searchContextSection}
 ### Job Description
 ${input.jobDescription}
 

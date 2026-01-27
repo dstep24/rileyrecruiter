@@ -7,6 +7,7 @@ import {
   X,
   Edit2,
   ChevronDown,
+  ChevronRight,
   RefreshCw,
   Send,
   User,
@@ -14,6 +15,7 @@ import {
   MapPin,
   ExternalLink,
   Linkedin,
+  Github,
   Loader2,
   AlertCircle,
   MessageSquare,
@@ -75,6 +77,8 @@ interface QueuedCandidate {
   trackerId?: string;
   acceptedAt?: string;
   pitchSentAt?: string;
+  // Source tracking (linkedin or github)
+  source?: 'linkedin' | 'github';
 }
 
 interface AssessmentTemplate {
@@ -162,6 +166,13 @@ function QueuePageContent() {
   const [assessmentTemplates, setAssessmentTemplates] = useState<AssessmentTemplate[]>([]);
   const [linkingAssessment, setLinkingAssessment] = useState<string | null>(null); // candidate id being linked
   const [sendingPitch, setSendingPitch] = useState<Set<string>>(new Set()); // tracking pitch sends
+  const [expandedAwaitingItems, setExpandedAwaitingItems] = useState<Set<string>>(new Set()); // expanded awaiting connection items
+  const [confirmingRemove, setConfirmingRemove] = useState<string | null>(null); // item pending removal confirmation
+  // Connection Accepted - pitch editing state
+  const [expandedConnectedItems, setExpandedConnectedItems] = useState<Set<string>>(new Set()); // expanded connection accepted items
+  const [editingPitchDraft, setEditingPitchDraft] = useState<string | null>(null); // item id being edited
+  const [pitchDraftText, setPitchDraftText] = useState<string>(''); // current pitch draft text
+  const [generatingPitchPreview, setGeneratingPitchPreview] = useState<Set<string>>(new Set()); // loading state for pitch preview
 
   // Human-like outreach timing state
   const [showOutreachProgress, setShowOutreachProgress] = useState(false);
@@ -178,6 +189,15 @@ function QueuePageContent() {
   });
   const outreachCancelledRef = useRef(false);
   const timingConfig: HumanLikeTimingConfig = TIMING_PROFILES.moderate;
+
+  // Manual sync state
+  const [syncing, setSyncing] = useState(false);
+  const [lastSyncResult, setLastSyncResult] = useState<{
+    syncedAt: string;
+    foundTrackers: number;
+    updatedItems: number;
+    sentItemsChecked: number;
+  } | null>(null);
 
   // Initialize activeFlow from URL params, default to 'connection'
   const initialFlow = searchParams.get('flow') as OutreachFlow | null;
@@ -352,6 +372,391 @@ function QueuePageContent() {
   const saveQueue = (newQueue: QueuedCandidate[]) => {
     localStorage.setItem('riley_messaging_queue', JSON.stringify(newQueue));
     setQueue(newQueue);
+  };
+
+  // Manual sync function - queries LinkedIn directly via Unipile to check connection status
+  const forceSyncWithBackend = async () => {
+    setSyncing(true);
+    setError(null);
+
+    // Get all provider IDs from queue items that are in "sent" status
+    const sentItems = queue.filter(item => item.providerId && item.status === 'sent');
+
+    if (sentItems.length === 0) {
+      setLastSyncResult({
+        syncedAt: new Date().toISOString(),
+        foundTrackers: 0,
+        updatedItems: 0,
+        sentItemsChecked: 0,
+      });
+      setSyncing(false);
+      return;
+    }
+
+    const providerIds = sentItems.map(item => item.providerId).filter(Boolean) as string[];
+
+    try {
+      console.log('[Queue] Manual sync - checking', providerIds.length, 'sent items');
+      console.log('[Queue] Provider IDs being checked:', providerIds);
+
+      // STEP 1: Try to sync directly from LinkedIn via Unipile
+      // This queries actual connection status, not just our database
+      if (unipileConfig) {
+        console.log('[Queue] Querying LinkedIn directly for connection status...');
+        console.log('[Queue] Sending', providerIds.length, 'provider IDs to LinkedIn sync endpoint');
+
+        try {
+          const linkedInResponse = await fetch(`${API_BASE}/api/outreach/sync-connections-from-linkedin`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              providerIds,
+              unipileConfig: {
+                apiKey: unipileConfig.apiKey,
+                dsn: unipileConfig.dsn,
+                port: unipileConfig.port,
+                accountId: unipileConfig.accountId,
+              },
+            }),
+          });
+
+          console.log('[Queue] LinkedIn sync response status:', linkedInResponse.status);
+
+          if (linkedInResponse.ok) {
+            const linkedInData = await linkedInResponse.json();
+            console.log('[Queue] LinkedIn sync result:', linkedInData.summary);
+
+            if (linkedInData.summary.updated > 0) {
+              console.log('[Queue] LinkedIn sync updated', linkedInData.summary.updated, 'trackers');
+            }
+
+            // Log details about each result
+            if (linkedInData.results) {
+              linkedInData.results.forEach((r: { providerId: string; isConnected: boolean; wasUpdated: boolean; candidateName?: string; error?: string }) => {
+                if (r.isConnected) {
+                  console.log(`[Queue] ✅ ${r.candidateName || r.providerId}: Connected${r.wasUpdated ? ' (tracker updated)' : ''}`);
+                } else if (r.error) {
+                  console.log(`[Queue] ❌ ${r.providerId}: ${r.error}`);
+                }
+              });
+            }
+          } else {
+            const errorText = await linkedInResponse.text();
+            console.warn('[Queue] LinkedIn sync failed:', linkedInResponse.status, errorText);
+          }
+        } catch (linkedInError) {
+          console.error('[Queue] LinkedIn sync request failed:', linkedInError);
+          // Continue with database sync even if LinkedIn sync fails
+        }
+      } else {
+        console.log('[Queue] No Unipile config - skipping LinkedIn direct query');
+      }
+
+      // STEP 2: Now sync from our database to update local queue state
+      const response = await fetch(`${API_BASE}/api/outreach/status-by-providers`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ providerIds }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const statusMap = data.statusMap as Record<string, {
+          trackerId: string;
+          status: string;
+          acceptedAt: string | null;
+          pitchSentAt: string | null;
+        }>;
+
+        console.log('[Queue] Backend response - found trackers:', Object.keys(statusMap).length);
+        console.log('[Queue] Status map:', statusMap);
+
+        // Update queue items based on backend status
+        let updatedCount = 0;
+        const updatedQueue = queue.map(item => {
+          if (!item.providerId || !statusMap[item.providerId]) return item;
+
+          const backendStatus = statusMap[item.providerId];
+          console.log(`[Queue] Checking ${item.name}: local status=${item.status}, backend status=${backendStatus.status}`);
+
+          // Map backend status to queue status
+          let newStatus: QueuedCandidate['status'] = item.status;
+          let trackerId = item.trackerId;
+
+          if (backendStatus.status === 'CONNECTION_ACCEPTED' && item.status === 'sent') {
+            newStatus = 'connection_accepted';
+            updatedCount++;
+            console.log(`[Queue] Updating ${item.name} to connection_accepted`);
+          } else if (backendStatus.status === 'PITCH_PENDING' && item.status !== 'pitch_pending' && item.status !== 'pitch_sent') {
+            newStatus = 'pitch_pending';
+            updatedCount++;
+          } else if (backendStatus.status === 'PITCH_SENT' && item.status !== 'pitch_sent' && item.status !== 'replied') {
+            newStatus = 'pitch_sent';
+            updatedCount++;
+          } else if (backendStatus.status === 'REPLIED' && item.status !== 'replied') {
+            newStatus = 'replied';
+            updatedCount++;
+          }
+
+          // Always update trackerId if we have one
+          if (backendStatus.trackerId && !item.trackerId) {
+            trackerId = backendStatus.trackerId;
+          }
+
+          if (newStatus !== item.status || trackerId !== item.trackerId) {
+            return {
+              ...item,
+              status: newStatus,
+              trackerId,
+              acceptedAt: backendStatus.acceptedAt || item.acceptedAt,
+              pitchSentAt: backendStatus.pitchSentAt || item.pitchSentAt,
+            };
+          }
+
+          return item;
+        });
+
+        setLastSyncResult({
+          syncedAt: new Date().toISOString(),
+          foundTrackers: Object.keys(statusMap).length,
+          updatedItems: updatedCount,
+          sentItemsChecked: sentItems.length,
+        });
+
+        if (updatedCount > 0) {
+          saveQueue(updatedQueue);
+          console.log('[Queue] Manual sync completed - updated', updatedCount, 'items');
+        } else {
+          console.log('[Queue] Manual sync completed - no updates needed');
+          // If no updates but we have sent items without trackers, show a warning
+          const itemsWithoutTrackers = sentItems.filter(item => !statusMap[item.providerId!]);
+          if (itemsWithoutTrackers.length > 0) {
+            console.warn('[Queue] Warning: These sent items have no backend tracker:',
+              itemsWithoutTrackers.map(i => ({ name: i.name, providerId: i.providerId })));
+            setError(`${itemsWithoutTrackers.length} sent item(s) have no backend tracker. The connection may have been sent before tracker creation was implemented, or the Unipile webhook isn't receiving updates.`);
+          }
+        }
+      } else {
+        const errorText = await response.text();
+        console.error('[Queue] Sync failed:', response.status, errorText);
+        setError(`Sync failed: ${response.status} - ${errorText}`);
+      }
+    } catch (err) {
+      console.error('[Queue] Failed to sync status with backend:', err);
+      setError(err instanceof Error ? err.message : 'Failed to sync with backend');
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  // Toggle expanded state for awaiting connection items
+  const toggleAwaitingExpansion = (itemId: string) => {
+    setExpandedAwaitingItems(prev => {
+      const next = new Set(prev);
+      if (next.has(itemId)) {
+        next.delete(itemId);
+      } else {
+        next.add(itemId);
+      }
+      return next;
+    });
+  };
+
+  // Remove an item from the queue
+  const removeFromQueue = (itemId: string) => {
+    const updatedQueue = queue.filter((item) => item.id !== itemId);
+    saveQueue(updatedQueue);
+    setConfirmingRemove(null);
+    // Also remove from expanded set if present
+    setExpandedAwaitingItems(prev => {
+      const next = new Set(prev);
+      next.delete(itemId);
+      return next;
+    });
+    setExpandedConnectedItems(prev => {
+      const next = new Set(prev);
+      next.delete(itemId);
+      return next;
+    });
+  };
+
+  // Toggle expanded state for connection accepted items
+  const toggleConnectedExpansion = (itemId: string) => {
+    setExpandedConnectedItems(prev => {
+      const next = new Set(prev);
+      if (next.has(itemId)) {
+        next.delete(itemId);
+      } else {
+        next.add(itemId);
+      }
+      return next;
+    });
+  };
+
+  // Generate a pitch preview for editing
+  const generatePitchPreview = async (item: QueuedCandidate) => {
+    if (!item.trackerId) {
+      setError(`Cannot generate pitch for ${item.name}: No outreach tracker found.`);
+      return;
+    }
+
+    const anthropicApiKey = localStorage.getItem('riley_anthropic_api_key');
+    if (!anthropicApiKey) {
+      setError('Anthropic API key is required to generate AI pitches. Please configure it in Settings.');
+      return;
+    }
+
+    setGeneratingPitchPreview(prev => new Set(prev).add(item.id));
+    setError(null);
+
+    try {
+      const response = await fetch(`${API_BASE}/api/outreach/${item.trackerId}/generate-pitch-preview`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Anthropic-Api-Key': anthropicApiKey,
+        },
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || `Failed to generate pitch: ${response.status}`);
+      }
+
+      const data = await response.json();
+      setPitchDraftText(data.message);
+      setEditingPitchDraft(item.id);
+      console.log(`[Queue] Pitch preview generated for ${item.name}`);
+    } catch (err) {
+      console.error(`[Queue] Error generating pitch preview for ${item.name}:`, err);
+      setError(err instanceof Error ? err.message : 'Failed to generate pitch preview');
+    } finally {
+      setGeneratingPitchPreview(prev => {
+        const next = new Set(prev);
+        next.delete(item.id);
+        return next;
+      });
+    }
+  };
+
+  // Send pitch with custom message
+  const sendPitchWithCustomMessage = async (item: QueuedCandidate, customMessage: string) => {
+    if (!item.trackerId) {
+      setError(`Cannot send pitch to ${item.name}: No outreach tracker found.`);
+      return;
+    }
+
+    setSendingPitch(prev => new Set(prev).add(item.id));
+    setError(null);
+
+    try {
+      const response = await fetch(`${API_BASE}/api/outreach/${item.trackerId}/send-pitch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // forceUpdateStatus: true will auto-update tracker from SENT to CONNECTION_ACCEPTED if needed
+        // Pass unipileConfig so backend can create a UnipileClient for sending
+        body: JSON.stringify({
+          customMessage,
+          forceUpdateStatus: true,
+          unipileConfig: unipileConfig ? {
+            apiKey: unipileConfig.apiKey,
+            dsn: unipileConfig.dsn,
+            port: unipileConfig.port,
+            accountId: unipileConfig.accountId,
+          } : undefined,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || `Failed to send pitch: ${response.status}`);
+      }
+
+      const data = await response.json();
+      console.log(`[Queue] Custom pitch sent to ${item.name}, conversation ID: ${data.conversationId}`);
+
+      // Update item status to pitch_sent
+      const updatedQueue = queue.map((q) =>
+        q.id === item.id ? { ...q, status: 'pitch_sent' as const, pitchSentAt: new Date().toISOString() } : q
+      );
+      saveQueue(updatedQueue);
+
+      // Clear editing state
+      setEditingPitchDraft(null);
+      setPitchDraftText('');
+      setExpandedConnectedItems(prev => {
+        const next = new Set(prev);
+        next.delete(item.id);
+        return next;
+      });
+    } catch (err) {
+      console.error(`[Queue] Error sending custom pitch to ${item.name}:`, err);
+      setError(err instanceof Error ? err.message : 'Failed to send pitch');
+    } finally {
+      setSendingPitch(prev => {
+        const next = new Set(prev);
+        next.delete(item.id);
+        return next;
+      });
+    }
+  };
+
+  // Track items being marked as connected
+  const [markingConnected, setMarkingConnected] = useState<Set<string>>(new Set());
+
+  // Manually mark an item as connected (for items sent before tracking was implemented)
+  const markAsConnected = async (item: QueuedCandidate) => {
+    setMarkingConnected((prev) => new Set(prev).add(item.id));
+    setError(null);
+
+    try {
+      // If we have a trackerId, update the backend tracker status first
+      if (item.trackerId) {
+        const response = await fetch(`${API_BASE}/api/outreach/${item.trackerId}/mark-connected`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.error || `Failed to mark as connected: ${response.status}`);
+        }
+
+        console.log('[Queue] Backend tracker updated to CONNECTION_ACCEPTED:', item.trackerId);
+      } else {
+        console.log('[Queue] No trackerId, only updating localStorage for:', item.id);
+      }
+
+      // Update localStorage
+      const updatedQueue = queue.map((q) =>
+        q.id === item.id
+          ? {
+              ...q,
+              status: 'connection_accepted' as const,
+              acceptedAt: new Date().toISOString(),
+            }
+          : q
+      );
+      saveQueue(updatedQueue);
+
+      // Collapse the item since it will move to a different section
+      setExpandedAwaitingItems((prev) => {
+        const next = new Set(prev);
+        next.delete(item.id);
+        return next;
+      });
+
+      console.log('[Queue] Manually marked as connected:', item.id);
+    } catch (err) {
+      console.error('[Queue] Error marking as connected:', err);
+      setError(err instanceof Error ? err.message : 'Failed to mark as connected');
+    } finally {
+      setMarkingConnected((prev) => {
+        const next = new Set(prev);
+        next.delete(item.id);
+        return next;
+      });
+    }
   };
 
   // Helper to determine if an item is connection flow or direct flow
@@ -1085,6 +1490,17 @@ Best regards`;
       const response = await fetch(`${API_BASE}/api/outreach/${item.trackerId}/send-pitch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        // forceUpdateStatus: true will auto-update tracker from SENT to CONNECTION_ACCEPTED if needed
+        // Pass unipileConfig so backend can create a UnipileClient for sending
+        body: JSON.stringify({
+          forceUpdateStatus: true,
+          unipileConfig: unipileConfig ? {
+            apiKey: unipileConfig.apiKey,
+            dsn: unipileConfig.dsn,
+            port: unipileConfig.port,
+            accountId: unipileConfig.accountId,
+          } : undefined,
+        }),
       });
 
       if (!response.ok) {
@@ -1210,8 +1626,45 @@ Best regards`;
             <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
             Refresh
           </button>
+          <button
+            onClick={forceSyncWithBackend}
+            disabled={syncing}
+            className="px-4 py-2 border border-green-300 text-green-700 rounded-lg hover:bg-green-50 flex items-center gap-2"
+            title="Force check backend for status updates"
+          >
+            <RefreshCw className={`h-4 w-4 ${syncing ? 'animate-spin' : ''}`} />
+            Sync Status
+          </button>
         </div>
       </div>
+
+      {/* Sync Result Info */}
+      {lastSyncResult && (
+        <div className="mb-4 p-3 bg-blue-50 rounded-lg text-sm">
+          <div className="flex items-center justify-between">
+            <span className="text-blue-700">
+              Last sync: {new Date(lastSyncResult.syncedAt).toLocaleTimeString()} —
+              Checked {lastSyncResult.sentItemsChecked} sent items,
+              found {lastSyncResult.foundTrackers} backend trackers,
+              updated {lastSyncResult.updatedItems} items
+            </span>
+            <button
+              onClick={() => setLastSyncResult(null)}
+              className="text-blue-600 hover:text-blue-800"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          {lastSyncResult.foundTrackers === 0 && lastSyncResult.sentItemsChecked > 0 && (
+            <p className="mt-1 text-orange-600 text-xs">
+              ⚠️ No backend trackers found. This could mean:
+              <br />• The connection was sent before tracker creation was added
+              <br />• The backend database has no record of these outreaches
+              <br />• Check browser console for detailed provider IDs
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Flow Tabs */}
       <div className="border-b border-gray-200">
@@ -1461,6 +1914,11 @@ Best regards`;
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <p className="font-medium text-gray-900 truncate">{item.name}</p>
+                      {item.source === 'github' && (
+                        <span className="flex items-center gap-1 px-1.5 py-0.5 bg-gray-800 text-white text-xs rounded-md" title="Sourced from GitHub">
+                          <Github className="h-3 w-3" />
+                        </span>
+                      )}
                       <a
                         href={item.profileUrl}
                         target="_blank"
@@ -1868,64 +2326,238 @@ Best regards`;
               </span>
             </h3>
             <p className="text-xs text-emerald-600 mt-1">
-              These candidates accepted your connection request. Send them a pitch message to start the conversation.
+              These candidates accepted your connection request. Expand to customize the pitch message before sending.
             </p>
           </div>
           <div className="divide-y divide-gray-100">
             {connectionAccepted.map((item) => (
-              <div key={item.id} className="flex items-center gap-4 px-4 py-3">
-                <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-600 text-sm font-medium overflow-hidden">
-                  {item.profilePictureUrl ? (
-                    <img
-                      src={item.profilePictureUrl}
-                      alt={item.name}
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    item.name.split(' ').map((n) => n[0]).join('')
-                  )}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-gray-900 truncate">{item.name}</p>
-                  <p className="text-xs text-gray-500">{item.currentTitle} {item.currentCompany && `at ${item.currentCompany}`}</p>
-                  {item.acceptedAt && (
-                    <p className="text-xs text-emerald-600">Connected {formatWaitTime(item.acceptedAt)} ago</p>
-                  )}
-                </div>
-                <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${statusColors[item.status]}`}>
-                  {statusLabels[item.status]}
-                </span>
-                {item.profileUrl && (
-                  <a
-                    href={item.profileUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="p-1.5 text-gray-400 hover:text-blue-600 rounded-lg hover:bg-blue-50"
-                    title="View LinkedIn Profile"
-                  >
-                    <ExternalLink className="h-4 w-4" />
-                  </a>
-                )}
-                {/* Send Pitch Button - show for both connection_accepted and pitch_pending with trackerId */}
-                {(item.status === 'connection_accepted' || item.status === 'pitch_pending') && item.trackerId && (
-                  <button
-                    onClick={() => sendPitch(item)}
-                    disabled={sendingPitch.has(item.id)}
-                    className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-sm hover:bg-emerald-700 flex items-center gap-1.5 disabled:opacity-50"
-                    title="Send pitch message to this candidate"
-                  >
-                    {sendingPitch.has(item.id) ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              <div key={item.id} className="flex flex-col">
+                {/* Main row - clickable to expand */}
+                <div
+                  className="flex items-center gap-4 px-4 py-3 cursor-pointer hover:bg-gray-50"
+                  onClick={() => toggleConnectedExpansion(item.id)}
+                >
+                  <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-600 text-sm font-medium overflow-hidden">
+                    {item.profilePictureUrl ? (
+                      <img
+                        src={item.profilePictureUrl}
+                        alt={item.name}
+                        className="w-full h-full object-cover"
+                      />
                     ) : (
-                      <Send className="h-3.5 w-3.5" />
+                      item.name.split(' ').map((n) => n[0]).join('')
                     )}
-                    {sendingPitch.has(item.id) ? 'Sending...' : 'Send Pitch'}
-                  </button>
-                )}
-                {(item.status === 'connection_accepted' || item.status === 'pitch_pending') && !item.trackerId && (
-                  <span className="px-3 py-1.5 bg-gray-100 text-gray-500 rounded-lg text-xs">
-                    No tracker - autopilot may send
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-gray-900 truncate">{item.name}</p>
+                    <p className="text-xs text-gray-500">{item.currentTitle} {item.currentCompany && `at ${item.currentCompany}`}</p>
+                    {item.acceptedAt && (
+                      <p className="text-xs text-emerald-600">Connected {formatWaitTime(item.acceptedAt)} ago</p>
+                    )}
+                  </div>
+                  <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${statusColors[item.status]}`}>
+                    {statusLabels[item.status]}
                   </span>
+                  {item.profileUrl && (
+                    <a
+                      href={item.profileUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="p-1.5 text-gray-400 hover:text-blue-600 rounded-lg hover:bg-blue-50"
+                      title="View LinkedIn Profile"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <ExternalLink className="h-4 w-4" />
+                    </a>
+                  )}
+                  {/* Quick send button (auto-generated message) */}
+                  {(item.status === 'connection_accepted' || item.status === 'pitch_pending') && item.trackerId && !expandedConnectedItems.has(item.id) && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); sendPitch(item); }}
+                      disabled={sendingPitch.has(item.id)}
+                      className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-sm hover:bg-emerald-700 flex items-center gap-1.5 disabled:opacity-50"
+                      title="Send auto-generated pitch message"
+                    >
+                      {sendingPitch.has(item.id) ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Send className="h-3.5 w-3.5" />
+                      )}
+                      {sendingPitch.has(item.id) ? 'Sending...' : 'Quick Send'}
+                    </button>
+                  )}
+                  {(item.status === 'connection_accepted' || item.status === 'pitch_pending') && !item.trackerId && (
+                    <span className="px-3 py-1.5 bg-gray-100 text-gray-500 rounded-lg text-xs">
+                      No tracker
+                    </span>
+                  )}
+                  {/* Expand/collapse chevron */}
+                  <button
+                    className="p-1.5 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
+                    onClick={(e) => { e.stopPropagation(); toggleConnectedExpansion(item.id); }}
+                  >
+                    {expandedConnectedItems.has(item.id) ? (
+                      <ChevronDown className="h-4 w-4" />
+                    ) : (
+                      <ChevronRight className="h-4 w-4" />
+                    )}
+                  </button>
+                </div>
+
+                {/* Expanded details section */}
+                {expandedConnectedItems.has(item.id) && (
+                  <div className="px-4 pb-4 pt-1 bg-emerald-50/50 border-t border-emerald-100">
+                    <div className="ml-12 space-y-3">
+                      {/* Job info */}
+                      {item.searchCriteria?.jobTitle && (
+                        <div className="flex items-center gap-2 text-sm">
+                          <ClipboardList className="h-4 w-4 text-emerald-600" />
+                          <span className="text-gray-600">Job:</span>
+                          <span className="font-medium text-gray-900">{item.searchCriteria.jobTitle}</span>
+                        </div>
+                      )}
+
+                      {/* Pitch message editor */}
+                      {item.trackerId && (
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <label className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                              <MessageSquare className="h-4 w-4 text-emerald-600" />
+                              Pitch Message
+                            </label>
+                            {editingPitchDraft !== item.id && (
+                              <button
+                                onClick={() => generatePitchPreview(item)}
+                                disabled={generatingPitchPreview.has(item.id)}
+                                className="text-xs text-emerald-600 hover:text-emerald-700 flex items-center gap-1"
+                              >
+                                {generatingPitchPreview.has(item.id) ? (
+                                  <>
+                                    <Loader2 className="h-3 w-3 animate-spin" />
+                                    Generating...
+                                  </>
+                                ) : (
+                                  <>
+                                    <Sparkles className="h-3 w-3" />
+                                    Generate with AI
+                                  </>
+                                )}
+                              </button>
+                            )}
+                          </div>
+
+                          {editingPitchDraft === item.id ? (
+                            <div className="space-y-2">
+                              <textarea
+                                value={pitchDraftText}
+                                onChange={(e) => setPitchDraftText(e.target.value)}
+                                className="w-full h-40 px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 resize-none"
+                                placeholder="Enter your pitch message..."
+                              />
+                              <div className="flex items-center justify-between">
+                                <span className="text-xs text-gray-500">
+                                  {pitchDraftText.length} characters
+                                </span>
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    onClick={() => { setEditingPitchDraft(null); setPitchDraftText(''); }}
+                                    className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800"
+                                  >
+                                    Cancel
+                                  </button>
+                                  <button
+                                    onClick={() => sendPitchWithCustomMessage(item, pitchDraftText)}
+                                    disabled={sendingPitch.has(item.id) || !pitchDraftText.trim()}
+                                    className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-sm hover:bg-emerald-700 flex items-center gap-1.5 disabled:opacity-50"
+                                  >
+                                    {sendingPitch.has(item.id) ? (
+                                      <>
+                                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                        Sending...
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Send className="h-3.5 w-3.5" />
+                                        Send Custom Pitch
+                                      </>
+                                    )}
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="bg-white rounded-lg border border-gray-200 p-3 text-sm text-gray-600">
+                              <p className="italic">Click "Generate with AI" to create a personalized pitch, or write your own.</p>
+                              <div className="mt-2 flex items-center gap-2">
+                                <button
+                                  onClick={() => { setPitchDraftText(''); setEditingPitchDraft(item.id); }}
+                                  className="text-xs text-emerald-600 hover:text-emerald-700 flex items-center gap-1"
+                                >
+                                  <Edit2 className="h-3 w-3" />
+                                  Write manually
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Action buttons */}
+                      <div className="flex items-center justify-between pt-2 border-t border-emerald-100">
+                        <div className="flex items-center gap-2">
+                          {/* Send auto-generated pitch */}
+                          {item.trackerId && editingPitchDraft !== item.id && (
+                            <button
+                              onClick={() => sendPitch(item)}
+                              disabled={sendingPitch.has(item.id)}
+                              className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-sm hover:bg-emerald-700 flex items-center gap-1.5 disabled:opacity-50"
+                              title="Send auto-generated pitch message"
+                            >
+                              {sendingPitch.has(item.id) ? (
+                                <>
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                  Sending...
+                                </>
+                              ) : (
+                                <>
+                                  <Send className="h-3.5 w-3.5" />
+                                  Send Auto Pitch
+                                </>
+                              )}
+                            </button>
+                          )}
+                        </div>
+
+                        {/* Remove from queue button */}
+                        {confirmingRemove === item.id ? (
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-red-600">Remove from queue?</span>
+                            <button
+                              onClick={() => removeFromQueue(item.id)}
+                              className="px-2 py-1 bg-red-600 text-white rounded text-xs hover:bg-red-700"
+                            >
+                              Yes, remove
+                            </button>
+                            <button
+                              onClick={() => setConfirmingRemove(null)}
+                              className="px-2 py-1 bg-gray-200 text-gray-700 rounded text-xs hover:bg-gray-300"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => setConfirmingRemove(item.id)}
+                            className="px-3 py-1.5 text-red-600 hover:text-red-700 hover:bg-red-50 rounded-lg text-sm flex items-center gap-1.5"
+                            title="Remove from queue"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            Remove
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
                 )}
               </div>
             ))}
@@ -2016,17 +2648,140 @@ Best regards`;
           </div>
           <div className="divide-y divide-gray-100">
             {connectionSent.map((item) => (
-              <div key={item.id} className="flex items-center gap-4 px-4 py-3">
-                <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-gray-600 text-sm font-medium">
-                  {item.name.split(' ').map((n) => n[0]).join('')}
+              <div key={item.id} className="border-b border-gray-100 last:border-b-0">
+                {/* Main row - clickable to expand */}
+                <div
+                  className="flex items-center gap-4 px-4 py-3 cursor-pointer hover:bg-gray-50"
+                  onClick={() => toggleAwaitingExpansion(item.id)}
+                >
+                  <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-gray-600 text-sm font-medium">
+                    {item.name.split(' ').map((n) => n[0]).join('')}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm font-medium text-gray-900 truncate">{item.name}</p>
+                      {item.source === 'github' && (
+                        <span className="flex items-center gap-1 px-1.5 py-0.5 bg-gray-800 text-white text-xs rounded-md" title="Sourced from GitHub">
+                          <Github className="h-3 w-3" />
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-gray-500">{messageTypeLabels[item.messageType].label}</p>
+                  </div>
+                  <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${statusColors.sent}`}>
+                    Sent
+                  </span>
+                  <button className="p-1 text-gray-400 hover:text-gray-600">
+                    {expandedAwaitingItems.has(item.id) ? (
+                      <ChevronDown className="h-4 w-4" />
+                    ) : (
+                      <ChevronRight className="h-4 w-4" />
+                    )}
+                  </button>
                 </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-gray-900 truncate">{item.name}</p>
-                  <p className="text-xs text-gray-500">{messageTypeLabels[item.messageType].label}</p>
-                </div>
-                <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${statusColors.sent}`}>
-                  Sent
-                </span>
+
+                {/* Expanded details */}
+                {expandedAwaitingItems.has(item.id) && (
+                  <div className="px-4 pb-4 pt-1 bg-gray-50 border-t border-gray-100">
+                    <div className="ml-12 space-y-2">
+                      {/* Job info */}
+                      {item.searchCriteria?.jobTitle && (
+                        <div className="flex items-center gap-2 text-sm">
+                          <ClipboardList className="h-4 w-4 text-gray-400" />
+                          <span className="text-gray-600">Job:</span>
+                          <span className="font-medium text-gray-900">{item.searchCriteria.jobTitle}</span>
+                        </div>
+                      )}
+
+                      {/* Connection type */}
+                      <div className="flex items-center gap-2 text-sm">
+                        <UserPlus className="h-4 w-4 text-gray-400" />
+                        <span className="text-gray-600">Type:</span>
+                        <span className="font-medium text-gray-900">{messageTypeLabels[item.messageType].label}</span>
+                      </div>
+
+                      {/* Message preview (if has message) */}
+                      {item.messageDraft && item.messageType !== 'connection_only' && (
+                        <div className="text-sm">
+                          <div className="flex items-center gap-2 mb-1">
+                            <MessageSquare className="h-4 w-4 text-gray-400" />
+                            <span className="text-gray-600">Message:</span>
+                          </div>
+                          <p className="ml-6 text-gray-700 text-xs bg-white p-2 rounded border border-gray-200 line-clamp-3">
+                            {item.messageDraft}
+                          </p>
+                        </div>
+                      )}
+
+                      {/* Sent timestamp */}
+                      <div className="flex items-center gap-2 text-xs text-gray-500">
+                        <span>Sent {new Date(item.createdAt).toLocaleDateString()} at {new Date(item.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                      </div>
+
+                      {/* Action buttons */}
+                      <div className="pt-2 border-t border-gray-200 mt-3 flex items-center gap-3">
+                        {/* Mark as Connected button */}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            markAsConnected(item);
+                          }}
+                          disabled={markingConnected.has(item.id)}
+                          className="flex items-center gap-1 px-3 py-1.5 text-xs bg-emerald-600 text-white rounded hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                          title="Manually mark this connection as accepted (for items sent before tracking was enabled)"
+                        >
+                          {markingConnected.has(item.id) ? (
+                            <>
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                              Updating...
+                            </>
+                          ) : (
+                            <>
+                              <Check className="h-3 w-3" />
+                              Mark as Connected
+                            </>
+                          )}
+                        </button>
+
+                        {/* Remove button */}
+                        {confirmingRemove === item.id ? (
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm text-red-600">Remove?</span>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                removeFromQueue(item.id);
+                              }}
+                              className="px-2 py-1 text-xs bg-red-600 text-white rounded hover:bg-red-700"
+                            >
+                              Yes
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setConfirmingRemove(null);
+                              }}
+                              className="px-2 py-1 text-xs bg-gray-200 text-gray-700 rounded hover:bg-gray-300"
+                            >
+                              No
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setConfirmingRemove(item.id);
+                            }}
+                            className="flex items-center gap-1 px-2 py-1 text-xs text-red-600 hover:text-red-700 hover:bg-red-50 rounded"
+                          >
+                            <Trash2 className="h-3 w-3" />
+                            Remove
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             ))}
           </div>

@@ -80,6 +80,15 @@ export interface RoleInput {
   isContractRole?: boolean;
   /** Expected contract duration (e.g., "6 months", "12+ months") */
   contractDuration?: string;
+  /**
+   * Search context for intelligent filtering decisions.
+   * Free-form context about the hiring situation that helps Riley make smarter decisions.
+   * Examples:
+   * - "Legacy enterprise company, below-market comp ($140-160K), avoid FAANG candidates"
+   * - "Fast-growing startup, equity-heavy, looking for risk-takers"
+   * - "Fortune 500 bank, highly regulated, prefer candidates from financial services"
+   */
+  searchContext?: string;
 }
 
 export interface PillarScore {
@@ -121,10 +130,24 @@ export interface BatchSourcingResult {
 // PROMPTS
 // =============================================================================
 
-const SOURCING_SYSTEM_PROMPT = `You are a senior technical recruiter evaluating candidates for SOURCING purposes.
+const SOURCING_SYSTEM_PROMPT = `You are a principal-level technical recruiter with 20+ years of experience evaluating candidates for SOURCING purposes.
 
 Your job is to quickly assess if a candidate is worth reaching out to based on high-level signals.
 This is NOT a final hiring decision - it's about identifying promising candidates for initial outreach.
+
+CRITICAL: SEARCH CONTEXT (when provided)
+When a search context is provided, it contains crucial intelligence about the hiring situation that MUST inform ALL your scoring decisions:
+- Company type/culture: Legacy enterprise vs startup vs FAANG affects who will be a culture fit
+- Compensation reality: Below-market comp means filtering out candidates who are likely making 2-3x the offered range
+- Industry context: Regulated industries need different candidate profiles than startups
+- Transformation needs: Some roles need candidates who can handle legacy modernization
+- Red flags to watch: Specific company types or backgrounds that won't work for this role
+
+Examples of how to use search context:
+- "Legacy enterprise, $150K max" → Penalize FAANG/big tech candidates (usually $300K+, won't take a pay cut)
+- "Series A startup, equity-heavy" → Prioritize candidates with startup experience, risk tolerance
+- "Fortune 500 bank, highly regulated" → Boost candidates from financial services, penalize pure startup backgrounds
+- "Avoid candidates from Google/Meta" → Explicitly reduce scores for those companies
 
 CRITICAL: Consider COMPANY CONTEXT when evaluating seniority/scope:
 - A "CTO" at a 50-person startup has similar scope to a "Director" at a 200-person company
@@ -163,6 +186,23 @@ function buildSourcingPrompt(candidate: CandidateInput, role: RoleInput): string
 These notes come from a live conversation with the hiring manager and OVERRIDE the standard requirements when there's a conflict. Weight these insights heavily:
 
 ${role.intakeNotes}
+
+---
+` : '';
+
+  // Build search context section if available - STRATEGIC FILTERING INTELLIGENCE
+  const searchContextSection = role.searchContext ? `
+## 🧠 SEARCH CONTEXT (STRATEGIC FILTERING INTELLIGENCE)
+The recruiter has provided specific context about this hiring situation. Use this to make INTELLIGENT filtering decisions about which candidates to prioritize or deprioritize:
+
+${role.searchContext}
+
+**How to apply this context:**
+- Adjust your scoring based on the compensation/market reality described
+- Consider company type/culture fit based on the context
+- Filter out candidates who clearly won't work for the described situation
+- Boost candidates who align with the specific needs mentioned
+- This context should influence Culture Fit scoring most heavily, but can affect all pillars
 
 ---
 ` : '';
@@ -250,7 +290,7 @@ ${candidate.skills.slice(0, 15).join(', ')}${candidate.skills.length > 15 ? ` (+
     : '';
 
   return `Evaluate this candidate for sourcing (initial outreach decision).
-${intakeNotesSection}
+${intakeNotesSection}${searchContextSection}
 ## Role We're Hiring For
 Title: ${role.title}
 Company Size: ${role.companySize || 'Unknown'}
@@ -329,6 +369,13 @@ If Must-Have skills are specified in Technical Requirements above, you MUST:
 - "GCP" = "Google Cloud Platform"
 
 ### Culture Fit (0-100) - Weight: 15%
+**CRITICAL: If SEARCH CONTEXT is provided above, it should HEAVILY influence this score:**
+- Use the search context to make intelligent filtering decisions
+- If context mentions compensation ($140-160K), penalize candidates at companies known for $300K+ comp (FAANG, unicorn startups)
+- If context mentions "legacy enterprise", boost candidates with enterprise/regulated industry experience
+- If context mentions specific red flags ("avoid FAANG"), directly reduce scores for those companies
+- The search context represents real market intelligence - use it like an expert recruiter would
+
 - BOOST if candidate has experience in TARGET INDUSTRIES (if specified)
 - PENALIZE if candidate is currently at an EXCLUDED COMPANY (if specified)
 - Look for "transformation" signals in work history:
@@ -378,7 +425,7 @@ IMPORTANT - Pillar Notes Style:
     "roleFit": { "score": <0-100>, "note": "<reference company/title if demonstrated, otherwise describe signal>" },
     "scopeMatch": { "score": <0-100>, "note": "<reference company size/team if known, otherwise describe inference>" },
     "technicalFit": { "score": <0-100>, "note": "<MUST list found/missing must-haves with source locations>" },
-    "cultureFit": { "score": <0-100>, "note": "<industry match, excluded company check, transformation signals>" },
+    "cultureFit": { "score": <0-100>, "note": "<MUST reference search context if provided, industry match, comp fit, excluded company check>" },
     "location": { "score": <0-100>, "note": "<state match type: exact city, same metro, or remote possibility>" }
   }
 }

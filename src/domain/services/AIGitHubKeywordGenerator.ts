@@ -521,3 +521,351 @@ export function generateGitHubKeywordsFallback(input: GitHubKeywordGeneratorInpu
 export function resetAIGitHubKeywordGenerator(): void {
   instance = null;
 }
+
+// =============================================================================
+// ROLE PROFILE GENERATION - Semantic understanding of what defines a role
+// =============================================================================
+
+/**
+ * AI-generated role profile for semantic title matching.
+ * Riley understands what characteristics define a role and looks for those signals.
+ *
+ * This is a GRANULAR profile that reflects top 1% engineering understanding.
+ */
+export interface RoleProfile {
+  jobTitle: string;
+
+  /** Core identity signals - how does this person describe themselves? */
+  identityTerms: string[];
+
+  /** Primary programming languages for this role */
+  coreLanguages: string[];
+
+  /** Platform/SDK-specific technologies */
+  platformTech: string[];
+
+  /** Architecture patterns and principles */
+  architecturePatterns: string[];
+
+  /** Frameworks and libraries */
+  frameworks: string[];
+
+  /** Testing tools and methodologies */
+  testingTools: string[];
+
+  /** CI/CD, build, and DevOps tools */
+  buildAndCICD: string[];
+
+  /** Work domain signals - what kind of work do they do? */
+  workSignals: string[];
+
+  /** Nice-to-have / bonus signals that indicate strong candidates */
+  bonusSignals: string[];
+
+  /** Anti-signals - what suggests this is NOT the role? */
+  antiSignals: string[];
+
+  /** Role description for context */
+  description: string;
+}
+
+const ROLE_PROFILE_SYSTEM_PROMPT = `You are Riley, an expert technical recruiter with TOP 1% engineering knowledge.
+
+Your task is to generate a GRANULAR semantic "role profile" for a job title. This profile helps identify whether a GitHub developer matches this role type.
+
+IMPORTANT: You have deep technical understanding. Break down the role into SPECIFIC technical categories, not generic buckets.
+
+PROFILE COMPONENTS (be exhaustive and specific):
+
+1. **identityTerms**: How might someone describe themselves?
+   - Title variations, abbreviations, informal descriptions
+   - Example for Android: ["android developer", "android engineer", "mobile developer", "kotlin developer", "android", "mobile engineer"]
+
+2. **coreLanguages**: Primary programming languages
+   - Be specific to the role
+   - Example for Android: ["kotlin", "java"]
+
+3. **platformTech**: Platform/SDK-specific technologies
+   - Core platform APIs and components
+   - Example for Android: ["android sdk", "android jetpack", "viewmodel", "navigation", "room", "datastore", "workmanager", "lifecycle"]
+
+4. **architecturePatterns**: Architecture and design patterns
+   - Example for Android: ["mvvm", "clean architecture", "repository pattern", "dependency injection", "solid"]
+
+5. **frameworks**: Key frameworks and libraries
+   - Be specific with actual library names
+   - Example for Android: ["jetpack compose", "retrofit", "okhttp", "hilt", "dagger", "coroutines", "flow", "rxjava", "glide", "coil"]
+
+6. **testingTools**: Testing frameworks and methodologies
+   - Example for Android: ["junit", "espresso", "mockito", "robolectric", "ui automator", "turbine"]
+
+7. **buildAndCICD**: Build tools, CI/CD, release tools
+   - Example for Android: ["gradle", "github actions", "bitrise", "circleci", "fastlane", "play console", "firebase app distribution"]
+
+8. **workSignals**: What kind of work indicates this role?
+   - Activities and responsibilities
+   - Example for Android: ["mobile development", "app development", "play store", "android apps", "mobile apps", "native mobile"]
+
+9. **bonusSignals**: Nice-to-have skills that indicate strong candidates
+   - Example for Android: ["kotlin multiplatform", "compose multiplatform", "graphql", "grpc", "performance optimization", "accessibility", "localization"]
+
+10. **antiSignals**: What suggests this is NOT the right role?
+    - Example for Android: ["ios only", "swift only", "react native only", "flutter only", "backend only", "web only"]
+
+11. **description**: One sentence describing the role
+
+GUIDELINES:
+- All terms lowercase
+- Be EXHAUSTIVE within each category
+- Use actual tool/library names, not generic categories
+- Think like a senior engineer who knows these ecosystems deeply
+
+Output valid JSON only.`;
+
+function buildRoleProfilePrompt(jobTitle: string): string {
+  return `Generate a granular semantic role profile for: "${jobTitle}"
+
+As a top 1% technical recruiter, break this role down into specific technical categories.
+
+Output JSON:
+{
+  "jobTitle": "${jobTitle}",
+  "identityTerms": ["..."],
+  "coreLanguages": ["..."],
+  "platformTech": ["..."],
+  "architecturePatterns": ["..."],
+  "frameworks": ["..."],
+  "testingTools": ["..."],
+  "buildAndCICD": ["..."],
+  "workSignals": ["..."],
+  "bonusSignals": ["..."],
+  "antiSignals": ["..."],
+  "description": "..."
+}`;
+}
+
+// Helper to normalize string arrays
+const normalizeArray = (arr: string[] | undefined): string[] =>
+  (arr || []).map((t: string) => t.toLowerCase().trim()).filter((t: string) => t.length > 0);
+
+/**
+ * Generate a semantic role profile using AI
+ */
+export async function generateRoleProfile(jobTitle: string): Promise<RoleProfile> {
+  const claude = getClaudeClient();
+
+  const response = await claude.chat({
+    systemPrompt: ROLE_PROFILE_SYSTEM_PROMPT,
+    prompt: buildRoleProfilePrompt(jobTitle),
+    temperature: 0.3,
+    maxTokens: 1500,
+  });
+
+  const parsed = claude.parseJsonResponse<RoleProfile>(response);
+
+  // Normalize all terms to lowercase
+  return {
+    jobTitle,
+    identityTerms: normalizeArray(parsed.identityTerms),
+    coreLanguages: normalizeArray(parsed.coreLanguages),
+    platformTech: normalizeArray(parsed.platformTech),
+    architecturePatterns: normalizeArray(parsed.architecturePatterns),
+    frameworks: normalizeArray(parsed.frameworks),
+    testingTools: normalizeArray(parsed.testingTools),
+    buildAndCICD: normalizeArray(parsed.buildAndCICD),
+    workSignals: normalizeArray(parsed.workSignals),
+    bonusSignals: normalizeArray(parsed.bonusSignals),
+    antiSignals: normalizeArray(parsed.antiSignals),
+    description: parsed.description || `Role: ${jobTitle}`,
+  };
+}
+
+/**
+ * Create an empty role profile with all required fields
+ */
+function createRoleProfile(
+  jobTitle: string,
+  data: Partial<Omit<RoleProfile, 'jobTitle'>>
+): RoleProfile {
+  return {
+    jobTitle,
+    identityTerms: data.identityTerms || [],
+    coreLanguages: data.coreLanguages || [],
+    platformTech: data.platformTech || [],
+    architecturePatterns: data.architecturePatterns || [],
+    frameworks: data.frameworks || [],
+    testingTools: data.testingTools || [],
+    buildAndCICD: data.buildAndCICD || [],
+    workSignals: data.workSignals || [],
+    bonusSignals: data.bonusSignals || [],
+    antiSignals: data.antiSignals || [],
+    description: data.description || `Role: ${jobTitle}`,
+  };
+}
+
+/**
+ * Fallback role profile generation when AI is unavailable.
+ * Uses heuristic patterns for common role types with GRANULAR technical detail.
+ */
+export function generateRoleProfileFallback(jobTitle: string): RoleProfile {
+  const titleLower = jobTitle.toLowerCase();
+  console.log('[RoleProfileFallback] Generating fallback profile for:', titleLower);
+
+  // Android / Mobile (Android-specific) roles
+  if (/\b(android|kotlin.*mobile|mobile.*kotlin)\b/.test(titleLower)) {
+    return createRoleProfile(jobTitle, {
+      identityTerms: ['android developer', 'android engineer', 'mobile developer', 'mobile engineer', 'android', 'kotlin developer', 'staff android', 'senior android'],
+      coreLanguages: ['kotlin', 'java'],
+      platformTech: ['android sdk', 'android jetpack', 'viewmodel', 'livedata', 'navigation', 'room', 'datastore', 'workmanager', 'lifecycle', 'paging', 'activity', 'fragment', 'service', 'broadcast receiver', 'content provider'],
+      architecturePatterns: ['mvvm', 'clean architecture', 'repository pattern', 'dependency injection', 'solid', 'mvi', 'unidirectional data flow'],
+      frameworks: ['jetpack compose', 'retrofit', 'okhttp', 'hilt', 'dagger', 'coroutines', 'flow', 'rxjava', 'rxkotlin', 'glide', 'coil', 'moshi', 'gson', 'ktor'],
+      testingTools: ['junit', 'espresso', 'mockito', 'mockk', 'robolectric', 'ui automator', 'turbine', 'truth', 'hamcrest'],
+      buildAndCICD: ['gradle', 'github actions', 'bitrise', 'circleci', 'jenkins', 'fastlane', 'play console', 'firebase app distribution', 'proguard', 'r8'],
+      workSignals: ['mobile development', 'android development', 'app development', 'play store', 'google play', 'android apps', 'mobile apps', 'native mobile', 'native android'],
+      bonusSignals: ['kotlin multiplatform', 'kmp', 'compose multiplatform', 'graphql', 'grpc', 'websockets', 'performance optimization', 'accessibility', 'a11y', 'localization', 'i18n', 'firebase', 'analytics', 'crashlytics', 'app bundle', 'dynamic delivery'],
+      antiSignals: ['ios only', 'swift only', 'react native only', 'flutter only', 'backend only', 'web only', 'frontend web', 'devops', 'data scientist', 'ml engineer'],
+      description: 'Builds native Android mobile applications using Kotlin and modern Android architecture',
+    });
+  }
+
+  // iOS / Mobile (iOS-specific) roles
+  if (/\b(ios|swift.*mobile|mobile.*swift|iphone)\b/.test(titleLower)) {
+    return createRoleProfile(jobTitle, {
+      identityTerms: ['ios developer', 'ios engineer', 'mobile developer', 'mobile engineer', 'ios', 'swift developer', 'apple developer'],
+      coreLanguages: ['swift', 'objective-c'],
+      platformTech: ['ios sdk', 'uikit', 'foundation', 'core data', 'core animation', 'core graphics', 'avfoundation', 'healthkit', 'mapkit', 'pushkit', 'callkit'],
+      architecturePatterns: ['mvvm', 'mvc', 'viper', 'clean architecture', 'coordinator pattern', 'dependency injection', 'protocol-oriented programming'],
+      frameworks: ['swiftui', 'combine', 'async/await', 'alamofire', 'rxswift', 'snapkit', 'kingfisher', 'realm', 'swinject'],
+      testingTools: ['xctest', 'quick', 'nimble', 'xcuitest', 'snapshot testing', 'mockingbird'],
+      buildAndCICD: ['xcode', 'fastlane', 'github actions', 'bitrise', 'circleci', 'testflight', 'app store connect', 'cocoapods', 'spm', 'carthage'],
+      workSignals: ['mobile development', 'ios development', 'app development', 'app store', 'apple', 'iphone apps', 'ipad apps', 'native mobile', 'native ios'],
+      bonusSignals: ['swift concurrency', 'swift macros', 'widgetkit', 'app clips', 'watchos', 'tvos', 'visionos', 'metal', 'arkit', 'coreml', 'accessibility', 'localization'],
+      antiSignals: ['android only', 'kotlin only', 'react native only', 'flutter only', 'backend only', 'web only'],
+      description: 'Builds native iOS mobile applications using Swift and modern iOS architecture',
+    });
+  }
+
+  // SRE / Platform / DevOps roles
+  if (/\b(sre|site reliability|platform engineer|devops|infrastructure engineer|cloud engineer)\b/.test(titleLower)) {
+    return createRoleProfile(jobTitle, {
+      identityTerms: ['sre', 'site reliability engineer', 'platform engineer', 'devops engineer', 'infrastructure engineer', 'cloud engineer', 'reliability engineer', 'systems engineer'],
+      coreLanguages: ['python', 'go', 'bash', 'shell'],
+      platformTech: ['linux', 'aws', 'gcp', 'azure', 'kubernetes', 'docker', 'containerd'],
+      architecturePatterns: ['infrastructure as code', 'gitops', 'immutable infrastructure', 'twelve-factor app', 'microservices', 'service mesh'],
+      frameworks: ['terraform', 'pulumi', 'ansible', 'helm', 'argocd', 'flux', 'crossplane'],
+      testingTools: ['terratest', 'conftest', 'opa', 'checkov', 'trivy'],
+      buildAndCICD: ['github actions', 'gitlab ci', 'jenkins', 'circleci', 'spinnaker', 'tekton'],
+      workSignals: ['reliability', 'infrastructure', 'observability', 'monitoring', 'incident response', 'on-call', 'uptime', 'scaling', 'automation', 'deployment', 'cloud infrastructure', 'production systems', 'slos', 'slis'],
+      bonusSignals: ['chaos engineering', 'cost optimization', 'finops', 'security', 'compliance', 'disaster recovery', 'capacity planning'],
+      antiSignals: ['frontend', 'react developer', 'mobile', 'data scientist', 'ml engineer', 'product designer', 'ui engineer'],
+      description: 'Ensures reliability and scalability of production infrastructure',
+    });
+  }
+
+  // Frontend roles
+  if (/\b(frontend|front-end|react|vue|angular|ui engineer)\b/.test(titleLower)) {
+    return createRoleProfile(jobTitle, {
+      identityTerms: ['frontend developer', 'frontend engineer', 'front-end developer', 'ui engineer', 'react developer', 'web developer', 'javascript developer'],
+      coreLanguages: ['typescript', 'javascript', 'html', 'css'],
+      platformTech: ['dom', 'browser apis', 'web components', 'pwa', 'service workers'],
+      architecturePatterns: ['component-based architecture', 'state management', 'flux', 'atomic design', 'jamstack', 'micro-frontends'],
+      frameworks: ['react', 'vue', 'angular', 'next.js', 'nuxt', 'svelte', 'redux', 'zustand', 'tanstack query', 'tailwind', 'styled-components'],
+      testingTools: ['jest', 'vitest', 'react testing library', 'cypress', 'playwright', 'storybook'],
+      buildAndCICD: ['webpack', 'vite', 'esbuild', 'turbopack', 'github actions', 'vercel', 'netlify'],
+      workSignals: ['user interface', 'web development', 'ui', 'ux', 'components', 'design systems', 'accessibility', 'performance', 'responsive design'],
+      bonusSignals: ['core web vitals', 'lighthouse', 'a11y', 'i18n', 'seo', 'graphql', 'animation', 'webgl', 'three.js'],
+      antiSignals: ['backend only', 'devops', 'sre', 'data engineer', 'ml engineer', 'mobile native only'],
+      description: 'Builds user-facing web interfaces and experiences',
+    });
+  }
+
+  // Backend roles
+  if (/\b(backend|back-end|server|api)\b/.test(titleLower)) {
+    return createRoleProfile(jobTitle, {
+      identityTerms: ['backend developer', 'backend engineer', 'back-end developer', 'server engineer', 'api developer', 'software engineer'],
+      coreLanguages: ['python', 'go', 'java', 'node.js', 'rust', 'c#'],
+      platformTech: ['linux', 'docker', 'kubernetes', 'aws', 'gcp', 'azure'],
+      architecturePatterns: ['microservices', 'monolith', 'event-driven', 'cqrs', 'domain-driven design', 'rest', 'graphql', 'grpc'],
+      frameworks: ['django', 'flask', 'fastapi', 'express', 'nestjs', 'spring boot', 'gin', 'fiber'],
+      testingTools: ['pytest', 'jest', 'junit', 'testcontainers', 'postman', 'insomnia'],
+      buildAndCICD: ['docker', 'github actions', 'gitlab ci', 'jenkins', 'kubernetes'],
+      workSignals: ['api development', 'server-side', 'database', 'microservices', 'distributed systems', 'scalability', 'performance', 'data modeling'],
+      bonusSignals: ['message queues', 'kafka', 'rabbitmq', 'caching', 'redis', 'elasticsearch', 'observability', 'tracing'],
+      antiSignals: ['frontend only', 'ui', 'mobile', 'devops only', 'data scientist'],
+      description: 'Builds server-side applications and APIs',
+    });
+  }
+
+  // Data roles - match "data engineer", "data engineering", "data scientist", "analytics engineer", etc.
+  // Note: Pattern must match leadership variants like "data engineering manager" and "data engineering lead"
+  const dataRolePattern = /\b(data engineer|data engineering|data scientist|data platform|analytics engineer|ml engineer|machine learning|ai engineer|data analyst)\b/;
+  const isDataRole = dataRolePattern.test(titleLower);
+  console.log('[RoleProfileFallback] Data role check:', { titleLower, isDataRole, pattern: dataRolePattern.source });
+
+  if (isDataRole) {
+    console.log('[RoleProfileFallback] ✓ Matched DATA role pattern!');
+    return createRoleProfile(jobTitle, {
+      identityTerms: ['data engineer', 'data engineering', 'data engineering manager', 'data engineering lead', 'data engineering director', 'data scientist', 'ml engineer', 'machine learning engineer', 'ai engineer', 'analytics engineer', 'data platform engineer', 'staff data engineer', 'senior data engineer', 'principal data engineer', 'head of data', 'vp data'],
+      coreLanguages: ['python', 'sql', 'scala', 'r', 'java'],
+      platformTech: ['spark', 'hadoop', 'flink', 'beam', 'databricks', 'snowflake', 'bigquery', 'redshift', 'athena', 'presto', 'trino', 'delta lake', 'iceberg', 'hudi'],
+      architecturePatterns: ['data lakehouse', 'medallion architecture', 'etl', 'elt', 'data mesh', 'feature store', 'lambda architecture', 'kappa architecture', 'data vault', 'dimensional modeling', 'star schema'],
+      frameworks: ['airflow', 'dagster', 'prefect', 'dbt', 'great expectations', 'pytorch', 'tensorflow', 'scikit-learn', 'pandas', 'polars', 'pyspark', 'koalas'],
+      testingTools: ['pytest', 'great expectations', 'dbt tests', 'mlflow', 'soda'],
+      buildAndCICD: ['github actions', 'gitlab ci', 'mlflow', 'kubeflow', 'sagemaker', 'datadog', 'monte carlo', 'elementary'],
+      workSignals: ['data pipeline', 'data engineering', 'data infrastructure', 'data platform', 'machine learning', 'analytics', 'model training', 'etl', 'elt', 'data warehouse', 'data lake', 'feature engineering', 'mlops', 'dataops', 'data quality', 'data governance', 'batch processing', 'stream processing', 'real-time data'],
+      bonusSignals: ['real-time streaming', 'llm', 'generative ai', 'vector databases', 'embeddings', 'rag', 'fine-tuning', 'kafka', 'kinesis', 'pub/sub', 'data observability', 'data catalog', 'data lineage'],
+      antiSignals: ['frontend', 'react developer', 'mobile', 'ui engineer', 'web developer', 'ios', 'android'],
+      description: 'Builds and manages data pipelines, data platforms, analytics infrastructure, or machine learning systems',
+    });
+  }
+
+  // Fullstack roles
+  if (/\b(fullstack|full-stack|full stack)\b/.test(titleLower)) {
+    return createRoleProfile(jobTitle, {
+      identityTerms: ['fullstack developer', 'full-stack developer', 'full stack engineer', 'software engineer', 'web developer'],
+      coreLanguages: ['typescript', 'javascript', 'python', 'go'],
+      platformTech: ['node.js', 'browser', 'docker', 'aws', 'vercel'],
+      architecturePatterns: ['mvc', 'rest', 'graphql', 'microservices', 'monolith', 'jamstack', 'serverless'],
+      frameworks: ['react', 'next.js', 'express', 'nestjs', 'django', 'fastapi', 'prisma', 'drizzle'],
+      testingTools: ['jest', 'vitest', 'cypress', 'playwright', 'pytest'],
+      buildAndCICD: ['github actions', 'vercel', 'docker', 'kubernetes'],
+      workSignals: ['web development', 'api development', 'frontend', 'backend', 'full stack', 'end-to-end', 'product development'],
+      bonusSignals: ['system design', 'database design', 'devops', 'cloud architecture', 'performance optimization'],
+      antiSignals: ['devops only', 'sre only', 'data scientist', 'mobile native only', 'ml engineer'],
+      description: 'Works across frontend and backend technologies',
+    });
+  }
+
+  // Generic Mobile roles (cross-platform or unspecified)
+  if (/\b(mobile engineer|mobile developer|mobile)\b/.test(titleLower)) {
+    return createRoleProfile(jobTitle, {
+      identityTerms: ['mobile developer', 'mobile engineer', 'app developer', 'android developer', 'ios developer'],
+      coreLanguages: ['kotlin', 'swift', 'dart', 'javascript', 'typescript'],
+      platformTech: ['android sdk', 'ios sdk', 'react native', 'flutter', 'expo'],
+      architecturePatterns: ['mvvm', 'clean architecture', 'redux', 'bloc', 'dependency injection'],
+      frameworks: ['jetpack compose', 'swiftui', 'react native', 'flutter', 'expo'],
+      testingTools: ['junit', 'xctest', 'detox', 'maestro', 'appium'],
+      buildAndCICD: ['gradle', 'xcode', 'fastlane', 'github actions', 'bitrise', 'expo eas'],
+      workSignals: ['mobile development', 'app development', 'mobile apps', 'cross-platform', 'native mobile'],
+      bonusSignals: ['performance optimization', 'offline-first', 'push notifications', 'deep linking', 'analytics'],
+      antiSignals: ['frontend web only', 'backend only', 'devops', 'data scientist', 'ml engineer'],
+      description: 'Builds mobile applications for Android and/or iOS',
+    });
+  }
+
+  // Default - generic software engineer (with minimal signals)
+  console.log('[RoleProfileFallback] ⚠️ No pattern matched, using GENERIC fallback for:', titleLower);
+  return createRoleProfile(jobTitle, {
+    identityTerms: ['software engineer', 'developer', 'engineer', 'programmer', 'software developer'],
+    coreLanguages: [],
+    platformTech: [],
+    architecturePatterns: [],
+    frameworks: [],
+    testingTools: [],
+    buildAndCICD: [],
+    workSignals: ['software development', 'coding', 'programming', 'building software'],
+    bonusSignals: [],
+    antiSignals: [],
+    description: `Software engineer: ${jobTitle}`,
+  });
+}

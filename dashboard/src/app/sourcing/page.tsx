@@ -22,6 +22,7 @@ import {
   Brain,
   ChevronDown,
   ChevronUp,
+  ChevronRight,
   ThumbsUp,
   ThumbsDown,
   Trash2,
@@ -39,6 +40,7 @@ import {
   Zap,
   X,
   ArrowRight,
+  ClipboardList,
 } from 'lucide-react';
 import { CandidateScoreCard, BatchScoringSummaryCard, type CandidateScore } from '../../components/CandidateScoreCard';
 import { SourcingScoreCard, BatchSourcingSummaryCard, type SourcingScore } from '../../components/SourcingScoreCard';
@@ -118,13 +120,41 @@ interface GitHubCandidateScore {
   };
   titleMatch: {
     score: number; // 0-100
-    matchedTerms: string[]; // Title terms found in bio
+    matchedSignals: string[]; // Role signals found in bio (semantic, not just keywords)
     reasons: string[];
   };
   contactQuality: {
     score: number;
     reasons: string[]; // e.g., "Email available (high confidence)", "Marked as hireable"
   };
+}
+
+// AI-generated role profile for semantic title matching
+// Riley understands what characteristics define a role with GRANULAR technical detail
+interface RoleProfile {
+  jobTitle: string;
+  // Core identity signals - how does this person describe themselves?
+  identityTerms: string[];
+  // Primary programming languages for this role
+  coreLanguages: string[];
+  // Platform/SDK-specific technologies
+  platformTech: string[];
+  // Architecture patterns and principles
+  architecturePatterns: string[];
+  // Frameworks and libraries
+  frameworks: string[];
+  // Testing tools and methodologies
+  testingTools: string[];
+  // CI/CD, build, and DevOps tools
+  buildAndCICD: string[];
+  // Work domain signals - what kind of work do they do?
+  workSignals: string[];
+  // Nice-to-have / bonus signals
+  bonusSignals: string[];
+  // Anti-signals - what suggests this is NOT the role?
+  antiSignals: string[];
+  // Role description for context
+  description: string;
 }
 
 // Search source type
@@ -306,6 +336,8 @@ interface QueuedCandidate {
   assessmentUrl?: string;
   // Error tracking
   errorMessage?: string;
+  // Source tracking (linkedin or github)
+  source?: 'linkedin' | 'github';
 }
 
 interface SearchRun {
@@ -340,6 +372,27 @@ interface SearchRun {
 
 // Storage key for persisting sourcing state
 const SOURCING_STORAGE_KEY = 'riley_sourcing_state';
+
+// Storage key for recent jobs
+const RECENT_JOBS_STORAGE_KEY = 'riley_recent_jobs';
+const MAX_RECENT_JOBS = 10;
+
+interface RecentJob {
+  id: string;
+  title: string;
+  companyName: string;
+  description: string;
+  skills: string;
+  location: string;
+  isFullyRemote: boolean;
+  isContractRole: boolean;
+  usOnlySearch: boolean;
+  intakeNotes: string;
+  excludeCompanies: string;
+  targetIndustries: string;
+  searchContext: string; // Context for Riley's intelligent filtering decisions
+  savedAt: string; // ISO timestamp
+}
 
 interface PersistedSourcingState {
   customJD: {
@@ -376,6 +429,7 @@ export default function SourcingPage() {
     intakeNotes: '', // Notes from hiring manager conversation - takes precedence over JD
     excludeCompanies: '', // Companies to exclude (e.g., "Google, Facebook, Amazon")
     targetIndustries: '', // Target industries for cultural fit (e.g., "fintech, insurance, banking")
+    searchContext: '', // Context for Riley to make intelligent filtering decisions (company type, compensation, culture)
   });
   const [parsedCriteria, setParsedCriteria] = useState<ParsedCriteria | null>(null);
   const [searchStrategy, setSearchStrategy] = useState<AISearchStrategy | null>(null);
@@ -434,7 +488,17 @@ export default function SourcingPage() {
   const [githubKeywordSource, setGithubKeywordSource] = useState<'basic' | 'ai'>('basic');
   const [expandedGithubCandidates, setExpandedGithubCandidates] = useState<Set<string>>(new Set());
   const [githubCandidateScores, setGithubCandidateScores] = useState<Map<string, GitHubCandidateScore>>(new Map());
+
+  // AI Role Profile for semantic title matching
+  const [roleProfile, setRoleProfile] = useState<RoleProfile | null>(null);
+  const [isGeneratingRoleProfile, setIsGeneratingRoleProfile] = useState(false);
+  const lastRoleProfileTitleRef = useRef<string>('');
   const [filterLinkedInOnly, setFilterLinkedInOnly] = useState(false);
+
+  // GitHub → LinkedIn Queue State
+  const [selectedGithubCandidates, setSelectedGithubCandidates] = useState<Set<string>>(new Set());
+  const [addingGithubToQueue, setAddingGithubToQueue] = useState(false);
+  const [linkedInResolveErrors, setLinkedInResolveErrors] = useState<Map<string, string>>(new Map());
 
   // Express Mode State - Automated pipeline from JD parse to queue
   const [expressMode, setExpressMode] = useState(false);
@@ -444,6 +508,8 @@ export default function SourcingPage() {
   const [showExpressCompleteModal, setShowExpressCompleteModal] = useState(false);
   const [expressAutoSend, setExpressAutoSend] = useState(false); // Auto-send connection requests in Express Mode
   const [expressMessageType, setExpressMessageType] = useState<'connection_only' | 'connection_request'>('connection_only'); // Message type for Express Mode
+  // LinkedIn Account Type - determines default outreach method (connection vs InMail)
+  const [linkedInAccountType, setLinkedInAccountType] = useState<'classic' | 'sales_navigator' | 'recruiter' | null>(null);
   const [expressModeResults, setExpressModeResults] = useState<{
     totalFound: number;
     enriched: number;
@@ -451,6 +517,7 @@ export default function SourcingPage() {
     queued: number;
     sent: number;
     failed: number;
+    approvalQueue: number; // Candidates with score 50-79 needing manual approval
     queuedCandidates: SourcedCandidate[];
   } | null>(null);
 
@@ -469,6 +536,63 @@ export default function SourcingPage() {
   });
   const outreachCancelledRef = useRef(false);
   const timingConfig: HumanLikeTimingConfig = TIMING_PROFILES.moderate;
+
+  // Recent Jobs State
+  const [recentJobs, setRecentJobs] = useState<RecentJob[]>([]);
+  const [showRecentJobsDropdown, setShowRecentJobsDropdown] = useState(false);
+  const recentJobsDropdownRef = useRef<HTMLDivElement>(null);
+
+  // Manual Profile Scorer State
+  const [manualProfileUrl, setManualProfileUrl] = useState('');
+  const [isScoringSingleProfile, setIsScoringSingleProfile] = useState(false);
+  const [singleProfileResult, setSingleProfileResult] = useState<{
+    profile: {
+      id: string;
+      name: string;
+      headline?: string;
+      currentTitle: string;
+      currentCompany: string;
+      location?: string;
+      profileUrl: string;
+      profilePictureUrl?: string;
+      summary?: string;
+      experienceCount: number;
+      skillCount: number;
+    };
+    score: {
+      candidateId: string;
+      overallScore: number;
+      recommendation: 'STRONG_YES' | 'YES' | 'MAYBE' | 'NO';
+      reasoning: string;
+      pillars: {
+        roleFit: { score: number; note: string };
+        scopeMatch: { score: number; note: string };
+        technicalFit: { score: number; note: string };
+        cultureFit: { score: number; note: string };
+        location: { score: number; note: string };
+      };
+      aiPowered: boolean;
+    };
+  } | null>(null);
+  const [singleProfileError, setSingleProfileError] = useState<string | null>(null);
+  const [showManualProfileScorer, setShowManualProfileScorer] = useState(false);
+
+  // Close recent jobs dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (recentJobsDropdownRef.current && !recentJobsDropdownRef.current.contains(event.target as Node)) {
+        setShowRecentJobsDropdown(false);
+      }
+    };
+
+    if (showRecentJobsDropdown) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showRecentJobsDropdown]);
 
   // Company Research State
   const [autoResearchEnabled, setAutoResearchEnabled] = useState(false);
@@ -505,6 +629,7 @@ export default function SourcingPage() {
           intakeNotes: (parsed.customJD as { intakeNotes?: string }).intakeNotes || '',
           excludeCompanies: (parsed.customJD as { excludeCompanies?: string }).excludeCompanies || '',
           targetIndustries: (parsed.customJD as { targetIndustries?: string }).targetIndustries || '',
+          searchContext: (parsed.customJD as { searchContext?: string }).searchContext || '',
         });
         if (parsed.parsedCriteria) setParsedCriteria(parsed.parsedCriteria);
         if (parsed.searchStrategy) setSearchStrategy(parsed.searchStrategy);
@@ -570,6 +695,108 @@ export default function SourcingPage() {
     } catch {
       // Ignore parse errors
     }
+  }, []);
+
+  // Load recent jobs from localStorage on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(RECENT_JOBS_STORAGE_KEY);
+      if (saved) {
+        const parsed: RecentJob[] = JSON.parse(saved);
+        setRecentJobs(parsed);
+      }
+    } catch {
+      // Ignore parse errors
+    }
+  }, []);
+
+  // Save current job to recent jobs list
+  const saveToRecentJobs = useCallback(() => {
+    if (!customJD.title.trim()) return; // Don't save if no title
+
+    const newJob: RecentJob = {
+      id: `job_${Date.now()}`,
+      title: customJD.title,
+      companyName: customJD.companyName,
+      description: customJD.description,
+      skills: customJD.skills,
+      location: customJD.location,
+      isFullyRemote: customJD.isFullyRemote,
+      isContractRole: customJD.isContractRole,
+      usOnlySearch: customJD.usOnlySearch,
+      intakeNotes: customJD.intakeNotes,
+      excludeCompanies: customJD.excludeCompanies,
+      targetIndustries: customJD.targetIndustries,
+      searchContext: customJD.searchContext,
+      savedAt: new Date().toISOString(),
+    };
+
+    setRecentJobs(prev => {
+      // Check if a job with the same title and company already exists
+      const existingIndex = prev.findIndex(
+        job => job.title.toLowerCase() === newJob.title.toLowerCase() &&
+               job.companyName.toLowerCase() === newJob.companyName.toLowerCase()
+      );
+
+      let updated: RecentJob[];
+      if (existingIndex >= 0) {
+        // Update existing job and move to front
+        updated = [
+          { ...newJob, id: prev[existingIndex].id },
+          ...prev.filter((_, i) => i !== existingIndex),
+        ];
+      } else {
+        // Add new job at front, limit to MAX_RECENT_JOBS
+        updated = [newJob, ...prev].slice(0, MAX_RECENT_JOBS);
+      }
+
+      // Persist to localStorage
+      try {
+        localStorage.setItem(RECENT_JOBS_STORAGE_KEY, JSON.stringify(updated));
+      } catch {
+        // Ignore storage errors
+      }
+
+      return updated;
+    });
+  }, [customJD]);
+
+  // Load a recent job into the form
+  const loadRecentJob = useCallback((job: RecentJob) => {
+    setCustomJD({
+      title: job.title,
+      companyName: job.companyName,
+      description: job.description,
+      skills: job.skills,
+      location: job.location,
+      isFullyRemote: job.isFullyRemote,
+      isContractRole: job.isContractRole,
+      usOnlySearch: job.usOnlySearch,
+      intakeNotes: job.intakeNotes,
+      excludeCompanies: job.excludeCompanies,
+      targetIndustries: job.targetIndustries,
+      searchContext: job.searchContext || '', // Handle older saved jobs without this field
+    });
+    // Clear any previous search results when loading a new job
+    setParsedCriteria(null);
+    setSearchStrategy(null);
+    setSearchRun(null);
+    setSkillTaxonomy(null);
+    setShowRecentJobsDropdown(false);
+  }, []);
+
+  // Delete a job from recent jobs list
+  const deleteRecentJob = useCallback((jobId: string, e: React.MouseEvent) => {
+    e.stopPropagation(); // Prevent triggering loadRecentJob
+    setRecentJobs(prev => {
+      const updated = prev.filter(job => job.id !== jobId);
+      try {
+        localStorage.setItem(RECENT_JOBS_STORAGE_KEY, JSON.stringify(updated));
+      } catch {
+        // Ignore storage errors
+      }
+      return updated;
+    });
   }, []);
 
   // Auto-populate GitHub search params from parsed JD criteria
@@ -654,6 +881,51 @@ export default function SourcingPage() {
       setIsGeneratingGithubKeywords(false);
     }
   };
+
+  // Generate AI role profile for semantic title matching
+  const generateRoleProfile = async (jobTitle: string) => {
+    if (!jobTitle || jobTitle === lastRoleProfileTitleRef.current) return;
+
+    setIsGeneratingRoleProfile(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/sourcing/github/role-profile`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobTitle }),
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        console.log('[Role Profile] Generated for', jobTitle, ':', {
+          identityTerms: result.identityTerms?.slice(0, 3),
+          coreLanguages: result.coreLanguages?.slice(0, 3),
+          frameworks: result.frameworks?.slice(0, 5),
+        });
+        setRoleProfile(result);
+        lastRoleProfileTitleRef.current = jobTitle;
+      } else {
+        console.error('[Role Profile] API failed:', response.status);
+        setRoleProfile(null);
+      }
+    } catch (error) {
+      console.error('[Role Profile] Error:', error);
+      setRoleProfile(null);
+    } finally {
+      setIsGeneratingRoleProfile(false);
+    }
+  };
+
+  // Auto-generate role profile when job title in GitHub search changes
+  useEffect(() => {
+    const jobTitle = githubSearchParams.jobTitle;
+    if (jobTitle && jobTitle !== lastRoleProfileTitleRef.current) {
+      // Debounce to avoid excessive API calls while typing
+      const timer = setTimeout(() => {
+        generateRoleProfile(jobTitle);
+      }, 500);
+      return () => clearTimeout(timer);
+    }
+  }, [githubSearchParams.jobTitle]);
 
   // Basic keyword generation (fallback when AI is unavailable)
   const generateBasicGithubKeywords = () => {
@@ -947,11 +1219,13 @@ export default function SourcingPage() {
   };
 
   // Score a GitHub candidate against search criteria using 5 pillars
+  // Uses semantic role profile for intelligent title matching
   const scoreGitHubCandidate = (
     candidate: GitHubCandidate,
     searchKeywords: string[],
     requiredLanguage?: string,
-    targetJobTitle?: string
+    targetJobTitle?: string,
+    currentRoleProfile?: RoleProfile | null
   ): GitHubCandidateScore => {
     // 1. TECHNICAL FIT (30%) - Languages, repos, stars
     const technicalReasons: string[] = [];
@@ -1050,74 +1324,132 @@ export default function SourcingPage() {
       ? Math.round((matchedKeywords.length / searchKeywords.length) * 100)
       : 50; // Default if no keywords
 
-    // 4. TITLE MATCH (20%) - Match job title against GitHub bio/description
+    // 4. TITLE MATCH (20%) - Semantic role matching using AI-generated role profile
+    // Riley understands what characteristics define a role and looks for those signals
     const titleMatchReasons: string[] = [];
-    const titleMatchedTerms: string[] = [];
+    const titleMatchedSignals: string[] = [];
     let titleMatchScore = 0;
 
-    if (targetJobTitle) {
-      // Parse job title into meaningful terms (skip common words)
+    const bioText = (candidate.bio || '').toLowerCase();
+    const repoText = (candidate.repoKeywords || '').toLowerCase();
+    const fullSearchText = `${bioText} ${repoText}`;
+
+    if (currentRoleProfile && currentRoleProfile.identityTerms.length > 0) {
+      // Use semantic role profile for intelligent matching
+      let identityMatches = 0;
+      let workMatches = 0;
+      let techMatches = 0;
+      let antiMatches = 0;
+
+      // Check identity terms (highest weight - what they call themselves)
+      for (const term of currentRoleProfile.identityTerms) {
+        if (fullSearchText.includes(term)) {
+          titleMatchedSignals.push(term);
+          identityMatches++;
+        }
+      }
+
+      // Check work signals (what kind of work they do)
+      for (const signal of currentRoleProfile.workSignals) {
+        if (fullSearchText.includes(signal)) {
+          if (!titleMatchedSignals.includes(signal)) {
+            titleMatchedSignals.push(signal);
+          }
+          workMatches++;
+        }
+      }
+
+      // Check tech signals (combine all technical categories from granular profile)
+      const allTechSignals = [
+        ...(currentRoleProfile.coreLanguages || []),
+        ...(currentRoleProfile.platformTech || []),
+        ...(currentRoleProfile.architecturePatterns || []),
+        ...(currentRoleProfile.frameworks || []),
+        ...(currentRoleProfile.testingTools || []),
+        ...(currentRoleProfile.buildAndCICD || []),
+      ];
+      for (const tech of allTechSignals) {
+        if (fullSearchText.includes(tech)) {
+          if (!titleMatchedSignals.includes(tech)) {
+            titleMatchedSignals.push(tech);
+          }
+          techMatches++;
+        }
+      }
+
+      // Check bonus signals (nice-to-have indicators)
+      let bonusMatches = 0;
+      for (const bonus of (currentRoleProfile.bonusSignals || [])) {
+        if (fullSearchText.includes(bonus)) {
+          if (!titleMatchedSignals.includes(bonus)) {
+            titleMatchedSignals.push(bonus);
+          }
+          bonusMatches++;
+        }
+      }
+
+      // Check anti-signals (things that suggest NOT this role)
+      for (const anti of currentRoleProfile.antiSignals) {
+        if (bioText.includes(anti)) {
+          antiMatches++;
+        }
+      }
+
+      // Calculate semantic match score
+      // Identity matches are most valuable (they explicitly identify as this role)
+      // Work and tech signals provide supporting evidence
+      // Bonus signals add extra points for strong candidates
+      const identityScore = identityMatches > 0 ? Math.min(35, identityMatches * 18) : 0;
+      const workScore = workMatches > 0 ? Math.min(25, workMatches * 8) : 0;
+      const techScore = techMatches > 0 ? Math.min(30, techMatches * 5) : 0;
+      const bonusScore = bonusMatches > 0 ? Math.min(10, bonusMatches * 3) : 0;
+
+      titleMatchScore = identityScore + workScore + techScore + bonusScore;
+
+      // Penalty for anti-signals (but don't go negative)
+      if (antiMatches > 0) {
+        titleMatchScore = Math.max(0, titleMatchScore - (antiMatches * 15));
+        titleMatchReasons.push(`⚠ ${antiMatches} anti-signal(s) found`);
+      }
+
+      titleMatchScore = Math.min(100, titleMatchScore);
+
+      // Generate reasons
+      if (identityMatches > 0) {
+        titleMatchReasons.push(`Role identity: ${identityMatches} match(es)`);
+      }
+      if (workMatches > 0) {
+        titleMatchReasons.push(`Work signals: ${workMatches} match(es)`);
+      }
+      if (techMatches > 0) {
+        titleMatchReasons.push(`Tech signals: ${techMatches} match(es)`);
+      }
+      if (bonusMatches > 0) {
+        titleMatchReasons.push(`Bonus signals: ${bonusMatches} match(es)`);
+      }
+      if (titleMatchedSignals.length === 0) {
+        titleMatchReasons.push('No role signals found in bio');
+      }
+
+    } else if (targetJobTitle) {
+      // Fallback: basic keyword matching if no role profile available
       const skipWords = new Set(['senior', 'junior', 'mid', 'level', 'lead', 'staff', 'principal', 'i', 'ii', 'iii', 'iv', 'v', 'the', 'a', 'an', 'and', 'or', 'of', 'at', 'in', 'for']);
       const titleTerms = targetJobTitle.toLowerCase()
         .split(/[\s\-\/&,]+/)
         .filter(t => t.length > 2 && !skipWords.has(t));
 
-      // Also check for common title variations
-      const titleVariations: Record<string, string[]> = {
-        'engineer': ['engineer', 'engineering', 'developer', 'dev'],
-        'developer': ['developer', 'dev', 'engineer', 'engineering'],
-        'architect': ['architect', 'architecture'],
-        'devops': ['devops', 'sre', 'platform', 'infrastructure', 'infra'],
-        'sre': ['sre', 'devops', 'reliability', 'platform'],
-        'platform': ['platform', 'infrastructure', 'devops', 'cloud'],
-        'data': ['data', 'analytics', 'ml', 'machine learning', 'ai'],
-        'frontend': ['frontend', 'front-end', 'front end', 'ui', 'react', 'vue', 'angular'],
-        'backend': ['backend', 'back-end', 'back end', 'api', 'server'],
-        'fullstack': ['fullstack', 'full-stack', 'full stack'],
-        'mobile': ['mobile', 'ios', 'android', 'react native', 'flutter'],
-        'researcher': ['researcher', 'research', 'scientist', 'phd'],
-        'scientist': ['scientist', 'researcher', 'research', 'phd'],
-      };
-
-      // Search in bio for title terms
-      const bioText = (candidate.bio || '').toLowerCase();
-
       for (const term of titleTerms) {
-        // Check direct match
         if (bioText.includes(term)) {
-          titleMatchedTerms.push(term);
-          titleMatchScore += 25;
-        } else {
-          // Check variations
-          const variations = titleVariations[term] || [];
-          for (const variation of variations) {
-            if (bioText.includes(variation)) {
-              titleMatchedTerms.push(`${term} (as "${variation}")`);
-              titleMatchScore += 20; // Slightly less for variation match
-              break;
-            }
-          }
+          titleMatchedSignals.push(term);
+          titleMatchScore += 20;
         }
       }
-
-      // Cap the score at 100
       titleMatchScore = Math.min(100, titleMatchScore);
 
-      if (titleMatchedTerms.length > 0) {
-        titleMatchReasons.push(`Title terms found: ${titleMatchedTerms.join(', ')}`);
+      if (titleMatchedSignals.length > 0) {
+        titleMatchReasons.push(`Basic keyword match: ${titleMatchedSignals.join(', ')}`);
       } else {
-        titleMatchReasons.push('No title match found in bio');
-      }
-
-      // Bonus for explicit job title phrases
-      const bioLower = bioText;
-      if (bioLower.includes('engineer') || bioLower.includes('developer')) {
-        titleMatchScore = Math.min(100, titleMatchScore + 10);
-        titleMatchReasons.push('Has engineering role in bio');
-      }
-      if (bioLower.includes('phd') || bioLower.includes('researcher') || bioLower.includes('scientist')) {
-        titleMatchScore = Math.min(100, titleMatchScore + 10);
-        titleMatchReasons.push('Has research credentials');
+        titleMatchReasons.push('No keyword matches (role profile not loaded)');
       }
     } else {
       titleMatchScore = 50; // Neutral if no job title specified
@@ -1179,7 +1511,7 @@ export default function SourcingPage() {
       technicalFit: { score: Math.min(100, technicalScore), reasons: technicalReasons },
       senioritySignals: { score: Math.min(100, seniorityScore), reasons: seniorityReasons },
       keywordMatch: { score: keywordScore, matchedKeywords, totalKeywords: searchKeywords.length },
-      titleMatch: { score: titleMatchScore, matchedTerms: titleMatchedTerms, reasons: titleMatchReasons },
+      titleMatch: { score: titleMatchScore, matchedSignals: titleMatchedSignals, reasons: titleMatchReasons },
       contactQuality: { score: Math.min(100, contactScore), reasons: contactReasons },
     };
   };
@@ -1225,23 +1557,35 @@ export default function SourcingPage() {
 
     try {
       // Build GitHub search query
-      // Note: GitHub user search API is limited - it only searches username, email, and full name
-      // It does NOT search bios. Language searches users with repos in that language.
+      // GitHub user search API is limited - freeform keywords make queries too restrictive
+      // Strategy: Use structured filters (language, location) for the API query,
+      // then use keywords for post-filtering on bio/repo content
       const queryParts: string[] = [];
       queryParts.push('type:user');
 
       if (githubSearchParams.language) {
         queryParts.push(`language:${githubSearchParams.language}`);
       }
+
+      // Add location - but skip vague regional terms that don't match GitHub's location field
       if (githubSearchParams.location) {
-        // Skip "Remote" and similar non-geographic locations
         const loc = githubSearchParams.location.toLowerCase();
-        if (!loc.match(/^(remote|hybrid|anywhere|global|worldwide)/)) {
-          queryParts.push(`location:"${githubSearchParams.location}"`);
+        // Skip non-geographic or vague regional terms
+        const skipPatterns = /^(remote|hybrid|anywhere|global|worldwide|midwest|east coast|west coast|usa|us|united states|europe|asia|pacific|region)/i;
+        if (!skipPatterns.test(loc)) {
+          // Use the city name (first part before comma)
+          const locationParts = githubSearchParams.location.split(',').map(p => p.trim());
+          const primaryLocation = locationParts[0];
+          // Only add if it looks like a real city (not too short, not a region)
+          if (primaryLocation.length > 2 && !skipPatterns.test(primaryLocation)) {
+            queryParts.push(`location:"${primaryLocation}"`);
+          }
         }
       }
-      // Note: We don't add keywords to the query since GitHub user search doesn't search bios
-      // Keywords will be used for filtering results after fetching profiles
+
+      // Keywords are used for post-filtering, not in the API query
+      // GitHub's user search doesn't handle freeform keyword matching well
+
       if (githubSearchParams.minFollowers) {
         queryParts.push(`followers:>=${githubSearchParams.minFollowers}`);
       }
@@ -1251,7 +1595,7 @@ export default function SourcingPage() {
 
       const query = queryParts.join(' ');
       console.log('[GitHub Search] Query:', query);
-      console.log('[GitHub Search] Keywords for filtering:', githubSearchParams.keywords || 'none');
+      console.log('[GitHub Search] Keywords for post-filtering:', githubSearchParams.keywords || 'none');
 
       // Search users via GitHub API
       const searchResponse = await fetch(
@@ -1271,6 +1615,12 @@ export default function SourcingPage() {
       }
 
       const searchData = await searchResponse.json();
+      console.log('[GitHub Search] Response:', {
+        totalCount: searchData.total_count,
+        itemsReturned: searchData.items?.length || 0,
+        rateLimitRemaining: searchResponse.headers.get('x-ratelimit-remaining'),
+        incompleteResults: searchData.incomplete_results,
+      });
       console.log('[GitHub Search] Found', searchData.total_count, 'users, fetching', searchData.items?.length || 0, 'profiles');
 
       // Fetch detailed profiles for each user (with rate limiting)
@@ -1423,14 +1773,14 @@ export default function SourcingPage() {
         }
       }
 
-      // Score and sort by keyword relevance (instead of filtering out non-matches)
-      // This way we still show all developers but prioritize those with relevant keywords
+      // Score, filter, and sort by keyword relevance
+      // Filter out candidates with zero keyword matches to maintain search quality
       let scoredCandidates = enrichedCandidates;
       if (githubSearchParams.keywords) {
         const keywords = githubSearchParams.keywords.toLowerCase().split(/\s+/).filter(k => k.length > 2);
         if (keywords.length > 0) {
           // Calculate keyword match score for each candidate
-          scoredCandidates = enrichedCandidates.map(candidate => {
+          const candidatesWithScores = enrichedCandidates.map(candidate => {
             const searchText = [
               candidate.bio || '',
               candidate.company || '',
@@ -1444,19 +1794,25 @@ export default function SourcingPage() {
             const matchCount = keywords.filter(keyword => searchText.includes(keyword)).length;
             const matchScore = matchCount / keywords.length; // 0 to 1
 
-            return { ...candidate, keywordMatchScore: matchScore };
+            return { ...candidate, keywordMatchScore: matchScore, keywordMatchCount: matchCount };
           });
 
+          // Filter: Keep only candidates with at least one keyword match
+          // This prevents irrelevant results when location narrows the search
+          const filteredCandidates = candidatesWithScores.filter(c => c.keywordMatchCount > 0);
+
           // Sort by keyword match score (highest first), then by followers
-          scoredCandidates.sort((a, b) => {
-            const scoreA = (a as { keywordMatchScore?: number }).keywordMatchScore || 0;
-            const scoreB = (b as { keywordMatchScore?: number }).keywordMatchScore || 0;
-            if (scoreB !== scoreA) return scoreB - scoreA;
+          filteredCandidates.sort((a, b) => {
+            if (b.keywordMatchScore !== a.keywordMatchScore) {
+              return b.keywordMatchScore - a.keywordMatchScore;
+            }
             return (b.followers || 0) - (a.followers || 0);
           });
 
-          const matchedCount = scoredCandidates.filter(c => (c as { keywordMatchScore?: number }).keywordMatchScore && (c as { keywordMatchScore?: number }).keywordMatchScore! > 0).length;
-          console.log('[GitHub Search] Keyword relevance scoring:', keywords, '- matched', matchedCount, 'of', enrichedCandidates.length, 'candidates');
+          scoredCandidates = filteredCandidates;
+
+          console.log('[GitHub Search] Keyword filtering:', keywords);
+          console.log('[GitHub Search] Kept', filteredCandidates.length, 'of', enrichedCandidates.length, 'candidates (filtered out', enrichedCandidates.length - filteredCandidates.length, 'with no keyword matches)');
         }
       }
 
@@ -1741,6 +2097,16 @@ export default function SourcingPage() {
       }
 
       // Create queue items for each candidate
+      // Determine default message type based on LinkedIn account type:
+      // - Recruiter/Sales Navigator → InMail (direct message, no connection needed)
+      // - Classic → Connection Request (need to connect first)
+      const defaultMessageType: 'connection_request' | 'inmail' =
+        (linkedInAccountType === 'recruiter' || linkedInAccountType === 'sales_navigator')
+          ? 'inmail'
+          : 'connection_request';
+
+      console.log(`[Sourcing] Creating queue items with default message type: ${defaultMessageType} (account: ${linkedInAccountType || 'unknown'})`);
+
       const newQueueItems: QueuedCandidate[] = candidates.map(candidate => ({
         id: `queue-${Date.now()}-${candidate.id}`,
         candidateId: candidate.id,
@@ -1754,7 +2120,7 @@ export default function SourcingPage() {
         profilePictureUrl: candidate.profilePictureUrl,
         relevanceScore: candidate.relevanceScore,
         status: 'pending',
-        messageType: 'connection_request', // Default to connection request
+        messageType: defaultMessageType, // Based on account type: InMail for Recruiter/SalesNav, Connection for Classic
         messageDraft: aiMessages.get(candidate.id), // Use AI-generated message if available
         createdAt: new Date().toISOString(),
         searchCriteria: parsedCriteria ? {
@@ -1764,6 +2130,7 @@ export default function SourcingPage() {
         // Include job requisition and assessment for linking
         jobRequisitionId: selectedReq || undefined,
         assessmentTemplateId,
+        source: 'linkedin', // Track source for queue display
       }));
 
       // Add to queue (avoid duplicates by providerId or candidateId)
@@ -1830,6 +2197,296 @@ export default function SourcingPage() {
       setSearchError('Failed to add candidates to queue');
     } finally {
       setAddingToQueue(false);
+    }
+  };
+
+  /**
+   * Add GitHub candidates with LinkedIn URLs to the messaging queue.
+   *
+   * This function:
+   * 1. Filters candidates that have LinkedIn URLs
+   * 2. Resolves LinkedIn URLs to provider IDs via Unipile
+   * 3. Converts GitHubCandidate to QueuedCandidate format
+   * 4. Generates AI message drafts
+   * 5. Adds to the same messaging queue used by LinkedIn candidates
+   */
+  const addGithubCandidatesToQueue = async (candidates: GitHubCandidate[]) => {
+    // Filter to only candidates with LinkedIn URLs
+    const candidatesWithLinkedIn = candidates.filter(c => c.linkedinUrl);
+
+    if (candidatesWithLinkedIn.length === 0) {
+      alert('No selected candidates have LinkedIn profiles.');
+      return;
+    }
+
+    setAddingGithubToQueue(true);
+    setLinkedInResolveErrors(new Map());
+
+    try {
+      console.log(`[Sourcing] Resolving ${candidatesWithLinkedIn.length} GitHub candidates to LinkedIn profiles...`);
+
+      // Check if Unipile is configured
+      if (!unipileConfig) {
+        throw new Error('LinkedIn integration not configured. Please connect LinkedIn in Settings to add GitHub candidates to the messaging queue.');
+      }
+
+      // Resolve LinkedIn profiles directly via Unipile API (from frontend)
+      // This avoids backend connectivity issues and matches how search works
+      const apiUrl = `https://${unipileConfig.dsn}.unipile.com:${unipileConfig.port}/api/v1`;
+
+      const resolved: Array<{
+        id: string;
+        providerId: string;
+        name: string;
+        headline?: string;
+        currentTitle?: string;
+        currentCompany?: string;
+        location?: string;
+        profileUrl: string;
+        profilePictureUrl?: string;
+      }> = [];
+
+      const failed: Array<{ id: string; error: string }> = [];
+
+      // Process candidates sequentially with rate limiting
+      for (const candidate of candidatesWithLinkedIn) {
+        try {
+          // Extract public ID from LinkedIn URL
+          const linkedinUrl = candidate.linkedinUrl || '';
+          const publicIdMatch = linkedinUrl.match(/linkedin\.com\/in\/([^\/\?]+)/);
+          const publicId = publicIdMatch ? publicIdMatch[1].replace(/\/$/, '') : null;
+
+          if (!publicId) {
+            failed.push({ id: candidate.id, error: 'Invalid LinkedIn URL format' });
+            continue;
+          }
+
+          console.log(`[Sourcing] Resolving LinkedIn profile: ${publicId}`);
+
+          // Call Unipile's user endpoint to get profile with provider_id
+          const userResponse = await fetch(
+            `${apiUrl}/users/${encodeURIComponent(publicId)}?account_id=${unipileConfig.accountId}&linkedin_sections=*`,
+            {
+              method: 'GET',
+              headers: {
+                'Accept': 'application/json',
+                'X-API-KEY': unipileConfig.apiKey,
+              },
+            }
+          );
+
+          if (userResponse.ok) {
+            const profile = await userResponse.json();
+            if (profile.provider_id) {
+              resolved.push({
+                id: candidate.id,
+                providerId: profile.provider_id,
+                name: profile.name || `${profile.first_name || ''} ${profile.last_name || ''}`.trim() || candidate.name || candidate.username,
+                headline: profile.headline,
+                currentTitle: profile.current_title,
+                currentCompany: profile.current_company,
+                location: profile.location,
+                profileUrl: profile.profile_url || linkedinUrl,
+                profilePictureUrl: profile.profile_picture_url,
+              });
+              console.log(`[Sourcing] Resolved ${publicId} -> ${profile.provider_id}`);
+            } else {
+              failed.push({ id: candidate.id, error: 'Profile found but no provider_id' });
+            }
+          } else {
+            const errorText = await userResponse.text();
+            console.error(`[Sourcing] Failed to resolve ${publicId}:`, errorText);
+            failed.push({ id: candidate.id, error: `API error: ${userResponse.status}` });
+          }
+
+          // Rate limiting delay
+          await new Promise(r => setTimeout(r, 500));
+        } catch (err) {
+          console.error(`[Sourcing] Error resolving ${candidate.linkedinUrl}:`, err);
+          failed.push({ id: candidate.id, error: err instanceof Error ? err.message : 'Unknown error' });
+        }
+      }
+
+      // Build response data structure matching what the rest of the function expects
+      const data = { resolved, failed };
+
+      // Track errors for display
+      if (data.failed?.length > 0) {
+        const errorMap = new Map<string, string>();
+        data.failed.forEach((f: { id: string; error: string }) => {
+          errorMap.set(f.id, f.error);
+        });
+        setLinkedInResolveErrors(errorMap);
+      }
+
+      if (data.resolved?.length === 0) {
+        alert('Could not resolve any LinkedIn profiles. The profiles may be private or not found.');
+        return;
+      }
+
+      console.log(`[Sourcing] Resolved ${data.resolved.length} LinkedIn profiles, ${data.failed?.length || 0} failed`);
+
+      // Get existing queue
+      const existingQueue = JSON.parse(
+        localStorage.getItem('riley_messaging_queue') || '[]'
+      ) as QueuedCandidate[];
+
+      // Get AI outreach messages
+      const anthropicApiKey = localStorage.getItem('riley_anthropic_api_key');
+      const roleInfo = {
+        title: githubSearchParams.jobTitle || parsedCriteria?.titles?.[0] || customJD.title || 'Software Engineer',
+        company: customJD.intakeNotes?.match(/company[:\s]+([^\n,]+)/i)?.[1]?.trim() || 'Our Client',
+        highlights: [
+          customJD.description?.slice(0, 100) || 'Great opportunity',
+          ...(parsedCriteria?.preferredSkills?.slice(0, 2) || []),
+        ].filter(Boolean),
+        location: customJD.location || undefined,
+      };
+
+      // Generate AI messages for resolved candidates
+      const aiMessages = new Map<string, string>();
+      if (anthropicApiKey) {
+        console.log('[Sourcing] Generating AI outreach messages for GitHub candidates...');
+        const batchSize = 3;
+
+        for (let i = 0; i < data.resolved.length; i += batchSize) {
+          const batch = data.resolved.slice(i, i + batchSize);
+          const results = await Promise.all(batch.map(async (profile: {
+            id: string;
+            providerId: string;
+            name: string;
+            headline?: string;
+            currentTitle?: string;
+            currentCompany?: string;
+            location?: string;
+          }) => {
+            const originalCandidate = candidatesWithLinkedIn.find(c => c.id === profile.id);
+
+            try {
+              const response = await fetch(`${API_BASE}/api/demo/ai/generate-outreach`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'X-Anthropic-Api-Key': anthropicApiKey,
+                },
+                body: JSON.stringify({
+                  candidate: {
+                    id: profile.id,
+                    name: profile.name,
+                    headline: profile.headline || originalCandidate?.bio,
+                    currentTitle: profile.currentTitle,
+                    currentCompany: profile.currentCompany || originalCandidate?.company,
+                    location: profile.location || originalCandidate?.location,
+                    skills: originalCandidate?.topLanguages || [],
+                  },
+                  role: roleInfo,
+                  channel: 'linkedin_connection',
+                }),
+              });
+
+              if (response.ok) {
+                const data = await response.json();
+                if (data.success && data.outreach?.message) {
+                  return { id: profile.id, message: data.outreach.message };
+                }
+              }
+            } catch (err) {
+              console.warn(`[Sourcing] Failed to generate AI outreach for ${profile.name}:`, err);
+            }
+            return { id: profile.id, message: undefined };
+          }));
+
+          results.forEach(({ id, message }) => {
+            if (message) aiMessages.set(id, message);
+          });
+        }
+        console.log('[Sourcing] Generated', aiMessages.size, 'AI outreach messages for GitHub candidates');
+      }
+
+      // Convert resolved profiles to QueuedCandidate format
+      // Use same account-type-based routing as LinkedIn candidates
+      const githubDefaultMessageType: 'connection_request' | 'inmail' =
+        (linkedInAccountType === 'recruiter' || linkedInAccountType === 'sales_navigator')
+          ? 'inmail'
+          : 'connection_request';
+
+      console.log(`[Sourcing] Creating GitHub→LinkedIn queue items with message type: ${githubDefaultMessageType}`);
+
+      const newQueueItems: QueuedCandidate[] = data.resolved.map((profile: {
+        id: string;
+        providerId: string;
+        name: string;
+        headline?: string;
+        currentTitle?: string;
+        currentCompany?: string;
+        location?: string;
+        profileUrl: string;
+        profilePictureUrl?: string;
+      }) => {
+        const originalCandidate = candidatesWithLinkedIn.find(c => c.id === profile.id);
+        const score = originalCandidate ? githubCandidateScores.get(originalCandidate.username) : undefined;
+
+        return {
+          id: `queue-${Date.now()}-${profile.id}`,
+          candidateId: profile.id,
+          providerId: profile.providerId,
+          name: profile.name,
+          headline: profile.headline || originalCandidate?.bio || undefined,
+          currentTitle: profile.currentTitle,
+          currentCompany: profile.currentCompany || originalCandidate?.company || undefined,
+          location: profile.location || originalCandidate?.location || undefined,
+          profileUrl: profile.profileUrl,
+          profilePictureUrl: profile.profilePictureUrl || originalCandidate?.avatarUrl,
+          relevanceScore: score?.overall || 50,
+          status: 'pending' as const,
+          messageType: githubDefaultMessageType,
+          messageDraft: aiMessages.get(profile.id),
+          createdAt: new Date().toISOString(),
+          searchCriteria: {
+            jobTitle: githubSearchParams.jobTitle || customJD.title || 'Software Engineer',
+            skills: originalCandidate?.topLanguages || [],
+          },
+          jobRequisitionId: selectedReq || undefined,
+          source: 'github', // Track source for queue display
+        };
+      });
+
+      // Deduplicate against existing queue
+      const existingProviderIds = new Set(existingQueue.map(q => q.providerId).filter(Boolean));
+      const uniqueNewItems = newQueueItems.filter(item => !existingProviderIds.has(item.providerId));
+
+      // Save to queue
+      const updatedQueue = [...existingQueue, ...uniqueNewItems];
+      localStorage.setItem('riley_messaging_queue', JSON.stringify(updatedQueue));
+
+      // Clear selection
+      setSelectedGithubCandidates(new Set());
+
+      // Show success/failure summary
+      const successCount = uniqueNewItems.length;
+      const failedCount = data.failed?.length || 0;
+      const duplicateCount = newQueueItems.length - uniqueNewItems.length;
+
+      let message = `Added ${successCount} GitHub candidate(s) to LinkedIn messaging queue.`;
+
+      if (aiMessages.size > 0) {
+        message += `\n\n✅ AI-generated personalized outreach messages created for ${aiMessages.size} candidate(s).`;
+      }
+
+      if (duplicateCount > 0) {
+        message += `\n\n⚠️ ${duplicateCount} already in queue (skipped).`;
+      }
+      if (failedCount > 0) {
+        message += `\n\n❌ ${failedCount} LinkedIn profile(s) could not be resolved.`;
+      }
+
+      alert(`${message}\n\nGo to Approval Queue to review and send messages.`);
+
+    } catch (error) {
+      console.error('[Sourcing] Error adding GitHub candidates to queue:', error);
+      alert(`Failed to add candidates: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      setAddingGithubToQueue(false);
     }
   };
 
@@ -2161,8 +2818,8 @@ export default function SourcingPage() {
 
       setExpressModeProgress(85);
 
-      // Step 5: Auto-queue candidates with score >= 60
-      console.log('[Express Mode] Step 5: Auto-queuing qualified candidates...');
+      // Step 5: Auto-queue candidates with score >= 50
+      console.log('[Express Mode] Step 5: Auto-queuing candidates...');
       setExpressModeStep('queuing');
       setExpressModeProgress(90);
 
@@ -2172,44 +2829,70 @@ export default function SourcingPage() {
         throw new Error('Search run state lost');
       }
 
-      // Filter candidates with score >= 60 and status 'new'
+      // Filter candidates with score >= 50 and status 'new'
+      // These will be queued for review
       const qualifiedCandidates = scoredSearchRun.candidates.filter(c => {
         const score = c.sourcingScore?.overallScore ?? c.relevanceScore ?? 0;
-        return score >= 60 && c.status === 'new';
+        return score >= 50 && c.status === 'new';
       });
 
-      console.log(`[Express Mode] ${qualifiedCandidates.length} candidates qualify for queue (score >= 60)`);
+      // Further filter for auto-send: only score >= 80 get auto-sent
+      // Candidates with 50-79 will be queued for approval
+      const autoSendCandidates = qualifiedCandidates.filter(c => {
+        const score = c.sourcingScore?.overallScore ?? c.relevanceScore ?? 0;
+        return score >= 80;
+      });
+
+      const approvalQueueCandidates = qualifiedCandidates.filter(c => {
+        const score = c.sourcingScore?.overallScore ?? c.relevanceScore ?? 0;
+        return score >= 50 && score < 80;
+      });
+
+      console.log(`[Express Mode] ${qualifiedCandidates.length} candidates qualify for queue (score >= 50)`);
+      console.log(`[Express Mode] ${autoSendCandidates.length} candidates eligible for auto-send (score >= 80)`);
+      console.log(`[Express Mode] ${approvalQueueCandidates.length} candidates for approval queue (score 50-79)`);
 
       let queuedCount = 0;
-      let queueItemIds: string[] = [];
+      let autoSendQueueItemIds: string[] = [];
+      let approvalQueueCount = 0;
+
       if (qualifiedCandidates.length > 0) {
-        // Queue the qualified candidates
+        // Queue ALL qualified candidates (both 80+ and 50-79)
         await addToQueue(qualifiedCandidates);
         queuedCount = qualifiedCandidates.length;
 
-        // Get the queue item IDs we just created
+        // Get the queue item IDs for auto-send candidates only (score >= 80)
         const queue: QueuedCandidate[] = JSON.parse(localStorage.getItem('riley_messaging_queue') || '[]');
-        queueItemIds = qualifiedCandidates
+        autoSendQueueItemIds = autoSendCandidates
           .map(c => queue.find(q => q.candidateId === c.id && q.status === 'pending')?.id)
           .filter((id): id is string => !!id);
+
+        approvalQueueCount = approvalQueueCandidates.length;
       }
 
       setExpressModeProgress(92);
 
-      // Step 6: Auto-send connection requests (optional - based on expressAutoSend setting)
+      // Step 6: Auto-send connection requests ONLY for high-confidence candidates (score >= 80)
+      // Candidates with score 50-79 remain in queue for manual approval
       let sentCount = 0;
       let failedCount = 0;
 
-      if (expressAutoSend && queueItemIds.length > 0) {
-        console.log(`[Express Mode] Step 6: Auto-sending connection requests (${expressMessageType})...`);
+      if (expressAutoSend && autoSendQueueItemIds.length > 0) {
+        console.log(`[Express Mode] Step 6: Auto-sending ${autoSendQueueItemIds.length} high-confidence requests (score >= 80)...`);
         setExpressModeStep('sending');
         setExpressModeProgress(95);
 
-        const sendResults = await autoSendConnectionRequests(queueItemIds, expressMessageType);
+        const sendResults = await autoSendConnectionRequests(autoSendQueueItemIds, expressMessageType);
         sentCount = sendResults.sent;
         failedCount = sendResults.failed;
       } else if (!expressAutoSend) {
         console.log('[Express Mode] Step 6: Skipping auto-send (disabled)');
+      } else if (autoSendQueueItemIds.length === 0) {
+        console.log('[Express Mode] Step 6: No candidates meet auto-send threshold (score >= 80)');
+      }
+
+      if (approvalQueueCount > 0) {
+        console.log(`[Express Mode] ${approvalQueueCount} candidates with score 50-79 added to approval queue`);
       }
 
       setExpressModeProgress(100);
@@ -2222,6 +2905,7 @@ export default function SourcingPage() {
         queued: queuedCount,
         sent: sentCount,
         failed: failedCount,
+        approvalQueue: approvalQueueCount,
         queuedCandidates: qualifiedCandidates,
       };
       setExpressModeResults(results);
@@ -2234,7 +2918,7 @@ export default function SourcingPage() {
 
       // Log activity
       const activityMessage = expressAutoSend
-        ? `Automated sourcing complete: ${results.totalFound} found, ${results.sent} connection requests sent`
+        ? `Automated sourcing complete: ${results.totalFound} found, ${results.sent} auto-sent (score ≥80), ${results.approvalQueue} queued for approval (score 50-79)`
         : `Automated sourcing complete: ${results.totalFound} found, ${results.queued} queued for review`;
       logActivity('Express Mode', activityMessage);
 
@@ -2386,6 +3070,8 @@ export default function SourcingPage() {
             targetIndustries: customJD.targetIndustries?.split(',').map(i => i.trim()).filter(Boolean) || undefined,
             // Contract role prioritization
             isContractRole: customJD.isContractRole,
+            // Search context for intelligent filtering (company type, comp level, culture, etc.)
+            searchContext: customJD.searchContext?.trim() || undefined,
           },
           // Intake notes from HM that take precedence over JD
           intakeNotes: customJD.intakeNotes?.trim() || undefined,
@@ -2457,6 +3143,81 @@ export default function SourcingPage() {
       }
     } finally {
       setIsAiScoring(false);
+    }
+  };
+
+  // Score a single LinkedIn profile URL against the current job
+  const scoreSingleProfile = async () => {
+    if (!manualProfileUrl.trim()) {
+      setSingleProfileError('Please enter a LinkedIn profile URL');
+      return;
+    }
+
+    if (!customJD.title.trim()) {
+      setSingleProfileError('Please enter a job title first to score against');
+      return;
+    }
+
+    setIsScoringSingleProfile(true);
+    setSingleProfileError(null);
+    setSingleProfileResult(null);
+
+    try {
+      // Get API key from localStorage (same pattern as other AI features)
+      const anthropicApiKey = localStorage.getItem('riley_anthropic_api_key');
+
+      // Build the role object from current job configuration
+      // Use searchStrategy if available for richer context (seniority, skills)
+      const role = {
+        title: customJD.title,
+        location: customJD.location || undefined,
+        // Get seniority from AI-parsed strategy if available
+        levelContext: searchStrategy?.seniorityLevel || undefined,
+        industry: customJD.targetIndustries || undefined,
+        technical: {
+          mustHave: customJD.skills?.split(',').map((s: string) => s.trim()).filter(Boolean) || searchStrategy?.mustHaveSkills || [],
+          niceToHave: parsedCriteria?.preferredSkills || searchStrategy?.niceToHaveSkills || [],
+        },
+        intakeNotes: customJD.intakeNotes || undefined,
+        isFullyRemote: customJD.isFullyRemote,
+        searchContext: customJD.searchContext || undefined,
+        excludeCompanies: customJD.excludeCompanies?.split(',').map((s: string) => s.trim()).filter(Boolean) || [],
+        targetIndustries: customJD.targetIndustries?.split(',').map((s: string) => s.trim()).filter(Boolean) || [],
+      };
+
+      const response = await fetch(`${API_BASE}/api/sourcing/score-profile`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(anthropicApiKey && {
+            'X-Anthropic-Api-Key': anthropicApiKey,
+          }),
+        },
+        body: JSON.stringify({
+          linkedinUrl: manualProfileUrl.trim(),
+          role,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || `Failed to score profile: ${response.status}`);
+      }
+
+      const data = await response.json();
+      setSingleProfileResult(data);
+
+      // Log activity
+      const scoreEmoji = data.score.recommendation === 'STRONG_YES' ? '🌟' :
+        data.score.recommendation === 'YES' ? '✓' :
+        data.score.recommendation === 'MAYBE' ? '~' : '✗';
+      console.log(`[Manual Score] ${data.profile.name}: ${data.score.overallScore} ${scoreEmoji} (${data.score.recommendation})`);
+
+    } catch (error) {
+      console.error('[Manual Score] Error scoring profile:', error);
+      setSingleProfileError(error instanceof Error ? error.message : 'Failed to score profile');
+    } finally {
+      setIsScoringSingleProfile(false);
     }
   };
 
@@ -2729,6 +3490,8 @@ export default function SourcingPage() {
               targetIndustries: customJD.targetIndustries?.split(',').map(i => i.trim()).filter(Boolean) || undefined,
               // Contract role prioritization
               isContractRole: customJD.isContractRole,
+              // Search context for intelligent filtering
+              searchContext: customJD.searchContext?.trim() || undefined,
             },
             // Intake notes from HM that take precedence over JD
             intakeNotes: customJD.intakeNotes?.trim() || undefined,
@@ -3249,6 +4012,7 @@ export default function SourcingPage() {
           location: isFullyRemote ? undefined : userLocation, // Skip location for fully remote
           isFullyRemote,
           intakeNotes: intakeNotes || undefined, // Notes from HM that override JD
+          searchContext: customJD.searchContext?.trim() || undefined, // Strategic context for intelligent query expansion
         }),
       });
 
@@ -3329,6 +4093,7 @@ export default function SourcingPage() {
     if (!unipileConfig || !criteria) return;
 
     setIsSearching(true);
+    saveToRecentJobs(); // Save job to recent jobs list when searching
     setSearchError(null);
     setSearchApiUsed(null);
     setApiWarning(null);
@@ -3593,6 +4358,19 @@ export default function SourcingPage() {
       }
 
       console.log(`[Sourcing] Available APIs: ${availableApis.join(', ')}`);
+
+      // Store the best account type for determining default outreach method
+      // Priority: recruiter > sales_navigator > classic
+      if (availableApis.includes('recruiter')) {
+        setLinkedInAccountType('recruiter');
+        console.log('[Sourcing] 📧 Account type: RECRUITER - will default to InMail for outreach');
+      } else if (availableApis.includes('sales_navigator')) {
+        setLinkedInAccountType('sales_navigator');
+        console.log('[Sourcing] 📧 Account type: SALES NAVIGATOR - will default to InMail for outreach');
+      } else {
+        setLinkedInAccountType('classic');
+        console.log('[Sourcing] 🔗 Account type: CLASSIC - will default to Connection Requests for outreach');
+      }
 
       // Only try APIs that are actually available
       const apisToTry = availableApis;
@@ -4091,6 +4869,7 @@ export default function SourcingPage() {
       intakeNotes: '',
       excludeCompanies: '',
       targetIndustries: '',
+      searchContext: '',
     });
     setParsedCriteria(null);
     setSearchStrategy(null);
@@ -4369,6 +5148,104 @@ export default function SourcingPage() {
                   </p>
                 </div>
 
+                {/* Role Profile Display - shows what signals Riley is looking for */}
+                {roleProfile && (
+                  <div className="bg-purple-50 border border-purple-200 rounded-lg p-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <h4 className="text-sm font-medium text-purple-900 flex items-center gap-1.5">
+                        <Brain className="h-4 w-4" />
+                        Riley&apos;s Role Understanding
+                      </h4>
+                      {isGeneratingRoleProfile && (
+                        <Loader2 className="h-3 w-3 animate-spin text-purple-600" />
+                      )}
+                    </div>
+                    <p className="text-xs text-purple-700 mb-2">{roleProfile.description}</p>
+
+                    <div className="space-y-1.5 text-xs">
+                      {roleProfile.identityTerms?.length > 0 && (
+                        <div>
+                          <span className="text-purple-600 font-medium">Identity: </span>
+                          <span className="text-purple-800">
+                            {roleProfile.identityTerms.slice(0, 5).join(', ')}
+                          </span>
+                        </div>
+                      )}
+                      {roleProfile.coreLanguages?.length > 0 && (
+                        <div>
+                          <span className="text-purple-600 font-medium">Languages: </span>
+                          <span className="text-purple-800">
+                            {roleProfile.coreLanguages.join(', ')}
+                          </span>
+                        </div>
+                      )}
+                      {roleProfile.platformTech?.length > 0 && (
+                        <div>
+                          <span className="text-purple-600 font-medium">Platform: </span>
+                          <span className="text-purple-800">
+                            {roleProfile.platformTech.slice(0, 6).join(', ')}
+                          </span>
+                        </div>
+                      )}
+                      {roleProfile.architecturePatterns?.length > 0 && (
+                        <div>
+                          <span className="text-purple-600 font-medium">Architecture: </span>
+                          <span className="text-purple-800">
+                            {roleProfile.architecturePatterns.slice(0, 5).join(', ')}
+                          </span>
+                        </div>
+                      )}
+                      {roleProfile.frameworks?.length > 0 && (
+                        <div>
+                          <span className="text-purple-600 font-medium">Frameworks: </span>
+                          <span className="text-purple-800">
+                            {roleProfile.frameworks.slice(0, 8).join(', ')}
+                          </span>
+                        </div>
+                      )}
+                      {roleProfile.testingTools?.length > 0 && (
+                        <div>
+                          <span className="text-purple-600 font-medium">Testing: </span>
+                          <span className="text-purple-800">
+                            {roleProfile.testingTools.slice(0, 5).join(', ')}
+                          </span>
+                        </div>
+                      )}
+                      {roleProfile.buildAndCICD?.length > 0 && (
+                        <div>
+                          <span className="text-purple-600 font-medium">CI/CD & Build: </span>
+                          <span className="text-purple-800">
+                            {roleProfile.buildAndCICD.slice(0, 5).join(', ')}
+                          </span>
+                        </div>
+                      )}
+                      {roleProfile.workSignals?.length > 0 && (
+                        <div>
+                          <span className="text-purple-600 font-medium">Work Signals: </span>
+                          <span className="text-purple-800">
+                            {roleProfile.workSignals.slice(0, 5).join(', ')}
+                          </span>
+                        </div>
+                      )}
+                      {roleProfile.bonusSignals?.length > 0 && (
+                        <div>
+                          <span className="text-purple-600 font-medium">Nice-to-Have: </span>
+                          <span className="text-purple-800">
+                            {roleProfile.bonusSignals.slice(0, 6).join(', ')}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {isGeneratingRoleProfile && !roleProfile && (
+                  <div className="bg-purple-50 border border-purple-200 rounded-lg p-3 flex items-center gap-2">
+                    <Loader2 className="h-4 w-4 animate-spin text-purple-600" />
+                    <span className="text-sm text-purple-700">Riley is learning about this role...</span>
+                  </div>
+                )}
+
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -4444,13 +5321,59 @@ export default function SourcingPage() {
               <>
                 <div className="bg-white rounded-lg border border-gray-200 p-4">
                   <div className="flex items-center justify-between mb-4">
-                    <h2 className="font-semibold text-gray-900">
-                      {filterLinkedInOnly
-                        ? `${githubCandidates.filter(c => c.linkedinUrl).length} Developers with LinkedIn`
-                        : `${githubCandidates.length} Developers Found`
-                      }
-                    </h2>
+                    <div className="flex items-center gap-3">
+                      <h2 className="font-semibold text-gray-900">
+                        {filterLinkedInOnly
+                          ? `${githubCandidates.filter(c => c.linkedinUrl).length} Developers with LinkedIn`
+                          : `${githubCandidates.length} Developers Found`
+                        }
+                      </h2>
+                      {/* Bulk selection checkbox - only for candidates with LinkedIn */}
+                      {githubCandidates.filter(c => c.linkedinUrl).length > 0 && (
+                        <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer ml-3">
+                          <input
+                            type="checkbox"
+                            checked={selectedGithubCandidates.size > 0 &&
+                              selectedGithubCandidates.size === githubCandidates.filter(c => c.linkedinUrl).length}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setSelectedGithubCandidates(new Set(
+                                  githubCandidates.filter(c => c.linkedinUrl).map(c => c.id)
+                                ));
+                              } else {
+                                setSelectedGithubCandidates(new Set());
+                              }
+                            }}
+                            className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                          />
+                          Select All ({githubCandidates.filter(c => c.linkedinUrl).length})
+                        </label>
+                      )}
+                    </div>
                     <div className="flex items-center gap-4">
+                      {/* Add to Queue Button - shown when candidates selected */}
+                      {selectedGithubCandidates.size > 0 && (
+                        <button
+                          onClick={() => {
+                            const selected = githubCandidates.filter(c => selectedGithubCandidates.has(c.id));
+                            addGithubCandidatesToQueue(selected);
+                          }}
+                          disabled={addingGithubToQueue}
+                          className="flex items-center gap-2 px-4 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 text-sm font-medium"
+                        >
+                          {addingGithubToQueue ? (
+                            <>
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                              Resolving LinkedIn...
+                            </>
+                          ) : (
+                            <>
+                              <Linkedin className="h-4 w-4" />
+                              Add {selectedGithubCandidates.size} to Queue
+                            </>
+                          )}
+                        </button>
+                      )}
                       <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
                         <input
                           type="checkbox"
@@ -4476,7 +5399,7 @@ export default function SourcingPage() {
                         ? githubSearchParams.keywords.split(/[,\s]+/).map(k => k.trim()).filter(k => k.length > 0)
                         : [];
                       const score = githubCandidateScores.get(candidate.username) ||
-                        scoreGitHubCandidate(candidate, allKeywords, githubSearchParams.language, githubSearchParams.jobTitle);
+                        scoreGitHubCandidate(candidate, allKeywords, githubSearchParams.language, githubSearchParams.jobTitle, roleProfile);
                       const isExpanded = expandedGithubCandidates.has(candidate.username);
 
                       return (
@@ -4486,6 +5409,26 @@ export default function SourcingPage() {
                         >
                           <div className="p-4">
                             <div className="flex items-start gap-4">
+                              {/* Selection checkbox - only for candidates with LinkedIn */}
+                              {candidate.linkedinUrl && (
+                                <input
+                                  type="checkbox"
+                                  checked={selectedGithubCandidates.has(candidate.id)}
+                                  onChange={(e) => {
+                                    setSelectedGithubCandidates(prev => {
+                                      const next = new Set(prev);
+                                      if (e.target.checked) {
+                                        next.add(candidate.id);
+                                      } else {
+                                        next.delete(candidate.id);
+                                      }
+                                      return next;
+                                    });
+                                  }}
+                                  className="mt-3 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                                  title="Select for LinkedIn outreach"
+                                />
+                              )}
                               <img
                                 src={candidate.avatarUrl}
                                 alt={candidate.name || candidate.username}
@@ -4571,6 +5514,19 @@ export default function SourcingPage() {
                                     <Star className="h-3 w-3" />
                                     {candidate.totalStars} stars
                                   </span>
+                                  {/* LinkedIn indicator - shows this candidate can be added to queue */}
+                                  {candidate.linkedinUrl && (
+                                    <a
+                                      href={candidate.linkedinUrl}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 transition-colors"
+                                      title="Has LinkedIn profile - can add to queue"
+                                    >
+                                      <Linkedin className="h-3 w-3" />
+                                      <span className="text-xs font-medium">LinkedIn</span>
+                                    </a>
+                                  )}
                                 </div>
                                 {candidate.topLanguages.length > 0 && (
                                   <div className="flex flex-wrap gap-1 mt-2">
@@ -4632,18 +5588,46 @@ export default function SourcingPage() {
                               {/* LinkedIn Profile Link - shown prominently if available */}
                               {candidate.linkedinUrl && (
                                 <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-                                  <div className="flex items-center gap-2">
-                                    <Linkedin className="h-5 w-5 text-blue-600" />
-                                    <a
-                                      href={candidate.linkedinUrl}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      className="text-sm font-medium text-blue-600 hover:text-blue-800 flex items-center gap-1"
+                                  <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-2">
+                                      <Linkedin className="h-5 w-5 text-blue-600" />
+                                      <a
+                                        href={candidate.linkedinUrl}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-sm font-medium text-blue-600 hover:text-blue-800 flex items-center gap-1"
+                                      >
+                                        View LinkedIn Profile
+                                        <ExternalLink className="h-3 w-3" />
+                                      </a>
+                                    </div>
+                                    {/* Individual Add to Queue button */}
+                                    <button
+                                      onClick={() => addGithubCandidatesToQueue([candidate])}
+                                      disabled={addingGithubToQueue}
+                                      className="flex items-center gap-1 px-3 py-1.5 text-sm font-medium bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                                      title="Add to LinkedIn messaging queue"
                                     >
-                                      View LinkedIn Profile
-                                      <ExternalLink className="h-3 w-3" />
-                                    </a>
+                                      {addingGithubToQueue ? (
+                                        <>
+                                          <Loader2 className="h-3 w-3 animate-spin" />
+                                          Resolving...
+                                        </>
+                                      ) : (
+                                        <>
+                                          <ArrowRight className="h-3 w-3" />
+                                          Add to Queue
+                                        </>
+                                      )}
+                                    </button>
                                   </div>
+                                  {/* Show error if LinkedIn resolution failed */}
+                                  {linkedInResolveErrors.has(candidate.id) && (
+                                    <p className="text-xs text-red-600 mt-2 flex items-center gap-1">
+                                      <AlertCircle className="h-3 w-3" />
+                                      {linkedInResolveErrors.get(candidate.id)}
+                                    </p>
+                                  )}
                                 </div>
                               )}
 
@@ -4757,11 +5741,11 @@ export default function SourcingPage() {
                                     />
                                   </div>
                                   <div className="mt-1 text-xs text-gray-500">
-                                    {score.titleMatch.matchedTerms.length > 0 ? (
+                                    {score.titleMatch.matchedSignals.length > 0 ? (
                                       <div className="flex flex-wrap gap-1 mt-1">
-                                        {score.titleMatch.matchedTerms.map((term, i) => (
+                                        {score.titleMatch.matchedSignals.map((signal, i) => (
                                           <span key={i} className="px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded text-xs">
-                                            ✓ {term}
+                                            ✓ {signal}
                                           </span>
                                         ))}
                                       </div>
@@ -4841,10 +5825,83 @@ export default function SourcingPage() {
         <div className="lg:col-span-1 space-y-4">
           {/* Job Description Input */}
           <div className="bg-white rounded-lg border border-gray-200 p-4">
-            <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-              <Search className="h-5 w-5" />
-              Search Configuration
-            </h2>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="font-semibold text-gray-900 flex items-center gap-2">
+                <Search className="h-5 w-5" />
+                Search Configuration
+              </h2>
+              {/* Recent Jobs Dropdown */}
+              <div className="relative" ref={recentJobsDropdownRef}>
+                <button
+                  onClick={() => setShowRecentJobsDropdown(!showRecentJobsDropdown)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
+                >
+                  <Clock className="h-4 w-4" />
+                  Recent Jobs
+                  <ChevronDown className={`h-4 w-4 transition-transform ${showRecentJobsDropdown ? 'rotate-180' : ''}`} />
+                </button>
+                {showRecentJobsDropdown && (
+                  <div className="absolute right-0 top-full mt-1 w-80 bg-white rounded-lg shadow-lg border border-gray-200 z-50 max-h-96 overflow-y-auto">
+                    {recentJobs.length === 0 ? (
+                      <div className="p-4 text-center text-gray-500 text-sm">
+                        No recent jobs saved yet. Jobs are saved automatically when you search.
+                      </div>
+                    ) : (
+                      <div className="py-1">
+                        {recentJobs.map((job) => (
+                          <div
+                            key={job.id}
+                            onClick={() => loadRecentJob(job)}
+                            className="px-4 py-3 hover:bg-gray-50 cursor-pointer border-b border-gray-100 last:border-b-0 group"
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="flex-1 min-w-0">
+                                <div className="font-medium text-gray-900 truncate">
+                                  {job.title}
+                                </div>
+                                {job.companyName && (
+                                  <div className="text-sm text-gray-500 flex items-center gap-1 truncate">
+                                    <Building className="h-3 w-3 flex-shrink-0" />
+                                    {job.companyName}
+                                  </div>
+                                )}
+                                <div className="flex items-center gap-2 mt-1 text-xs text-gray-400">
+                                  {job.location && !job.isFullyRemote && (
+                                    <span className="flex items-center gap-0.5">
+                                      <MapPin className="h-3 w-3" />
+                                      {job.location}
+                                    </span>
+                                  )}
+                                  {job.isFullyRemote && (
+                                    <span className="flex items-center gap-0.5 text-blue-500">
+                                      <Globe className="h-3 w-3" />
+                                      Remote
+                                    </span>
+                                  )}
+                                  {job.isContractRole && (
+                                    <span className="flex items-center gap-0.5 text-orange-500">
+                                      <Briefcase className="h-3 w-3" />
+                                      Contract
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                              <button
+                                onClick={(e) => deleteRecentJob(job.id, e)}
+                                className="p-1 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                                title="Remove from recent jobs"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
 
             <div className="space-y-4">
               <div>
@@ -4918,6 +5975,27 @@ export default function SourcingPage() {
                     skillsAutoPopulated ? 'border-green-400 bg-green-50' : 'border-gray-300'
                   }`}
                 />
+              </div>
+
+              {/* Search Context - Advanced context for Riley's intelligent filtering */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  <span className="flex items-center gap-1.5">
+                    <Brain className="h-4 w-4 text-purple-500" />
+                    Search Context
+                    <span className="text-xs font-normal text-gray-500">(Riley's insider knowledge)</span>
+                  </span>
+                </label>
+                <textarea
+                  value={customJD.searchContext}
+                  onChange={(e) => setCustomJD({ ...customJD, searchContext: e.target.value })}
+                  placeholder="Give Riley context to make smart decisions. Examples:&#10;• 'Legacy enterprise company, below-market comp ($140-160K), avoid FAANG candidates'&#10;• 'Fast-growing startup, equity-heavy, looking for risk-takers from similar stage companies'&#10;• 'Fortune 500 bank, highly regulated, prefer candidates from financial services'&#10;• 'Early-stage AI startup, needs scrappy generalists, avoid big-company specialists'"
+                  rows={3}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500 text-sm"
+                />
+                <p className="mt-1 text-xs text-gray-500">
+                  Riley uses this context to filter candidates intelligently - company types, compensation fit, culture signals, etc.
+                </p>
               </div>
 
               <div>
@@ -5033,6 +6111,189 @@ export default function SourcingPage() {
                     For legacy/enterprise roles, exclude big tech where comp/culture won&apos;t match.
                   </p>
                 </div>
+              </div>
+
+              {/* Manual Profile Scorer - Quick check a specific LinkedIn profile */}
+              <div className="border-t border-gray-200 pt-4 mt-4">
+                <button
+                  onClick={() => setShowManualProfileScorer(!showManualProfileScorer)}
+                  className="flex items-center gap-2 text-sm font-medium text-gray-700 hover:text-blue-600 transition-colors w-full"
+                >
+                  {showManualProfileScorer ? (
+                    <ChevronDown className="h-4 w-4" />
+                  ) : (
+                    <ChevronRight className="h-4 w-4" />
+                  )}
+                  <User className="h-4 w-4 text-blue-600" />
+                  Quick Profile Check
+                  <span className="text-xs font-normal text-gray-500">(score any LinkedIn URL)</span>
+                </button>
+
+                {showManualProfileScorer && (
+                  <div className="mt-3 p-3 bg-blue-50/50 rounded-lg border border-blue-100 space-y-3">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        LinkedIn Profile URL
+                      </label>
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          value={manualProfileUrl}
+                          onChange={(e) => setManualProfileUrl(e.target.value)}
+                          placeholder="https://linkedin.com/in/username or just username"
+                          className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                        />
+                        <button
+                          onClick={scoreSingleProfile}
+                          disabled={isScoringSingleProfile || !manualProfileUrl.trim() || !customJD.title.trim()}
+                          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 text-sm font-medium"
+                        >
+                          {isScoringSingleProfile ? (
+                            <>
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                              Scoring...
+                            </>
+                          ) : (
+                            <>
+                              <Sparkles className="h-4 w-4" />
+                              Score
+                            </>
+                          )}
+                        </button>
+                      </div>
+                      {!customJD.title.trim() && (
+                        <p className="text-xs text-amber-600 mt-1">
+                          Enter a job title above first to score against.
+                        </p>
+                      )}
+                    </div>
+
+                    {singleProfileError && (
+                      <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+                        {singleProfileError}
+                      </div>
+                    )}
+
+                    {singleProfileResult && (
+                      <div className="space-y-3">
+                        {/* Profile Info */}
+                        <div className="flex items-start gap-3">
+                          {singleProfileResult.profile.profilePictureUrl ? (
+                            <img
+                              src={singleProfileResult.profile.profilePictureUrl}
+                              alt={singleProfileResult.profile.name}
+                              className="w-12 h-12 rounded-full object-cover"
+                            />
+                          ) : (
+                            <div className="w-12 h-12 rounded-full bg-gray-300 flex items-center justify-center text-gray-500 text-lg font-semibold">
+                              {singleProfileResult.profile.name.charAt(0)}
+                            </div>
+                          )}
+                          <div className="flex-1 min-w-0">
+                            <a
+                              href={singleProfileResult.profile.profileUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-sm font-semibold text-blue-600 hover:underline truncate block"
+                            >
+                              {singleProfileResult.profile.name}
+                            </a>
+                            <p className="text-xs text-gray-600 truncate">
+                              {singleProfileResult.profile.currentTitle} at {singleProfileResult.profile.currentCompany}
+                            </p>
+                            {singleProfileResult.profile.location && (
+                              <p className="text-xs text-gray-500 flex items-center gap-1">
+                                <MapPin className="h-3 w-3" />
+                                {singleProfileResult.profile.location}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Overall Score */}
+                        <div className={`p-3 rounded-lg ${
+                          singleProfileResult.score.recommendation === 'STRONG_YES' ? 'bg-emerald-100 border border-emerald-300' :
+                          singleProfileResult.score.recommendation === 'YES' ? 'bg-green-100 border border-green-300' :
+                          singleProfileResult.score.recommendation === 'MAYBE' ? 'bg-amber-100 border border-amber-300' :
+                          'bg-red-100 border border-red-300'
+                        }`}>
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-sm font-medium">
+                              {singleProfileResult.score.recommendation === 'STRONG_YES' ? '🌟 STRONG YES' :
+                               singleProfileResult.score.recommendation === 'YES' ? '✓ YES' :
+                               singleProfileResult.score.recommendation === 'MAYBE' ? '~ MAYBE' :
+                               '✗ NO'}
+                            </span>
+                            <span className="text-lg font-bold">{singleProfileResult.score.overallScore}/100</span>
+                          </div>
+                          <p className="text-xs text-gray-700">{singleProfileResult.score.reasoning}</p>
+                        </div>
+
+                        {/* Pillar Breakdown */}
+                        <div className="grid grid-cols-2 gap-2">
+                          {Object.entries(singleProfileResult.score.pillars).map(([key, pillar]) => (
+                            <div key={key} className="p-2 bg-white rounded border border-gray-200">
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-xs font-medium text-gray-600 capitalize">
+                                  {key.replace(/([A-Z])/g, ' $1').trim()}
+                                </span>
+                                <span className={`text-xs font-bold ${
+                                  pillar.score >= 80 ? 'text-emerald-600' :
+                                  pillar.score >= 60 ? 'text-green-600' :
+                                  pillar.score >= 40 ? 'text-amber-600' :
+                                  'text-red-600'
+                                }`}>
+                                  {pillar.score}
+                                </span>
+                              </div>
+                              <div className="h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                                <div
+                                  className={`h-full transition-all ${
+                                    pillar.score >= 80 ? 'bg-emerald-500' :
+                                    pillar.score >= 60 ? 'bg-green-500' :
+                                    pillar.score >= 40 ? 'bg-amber-500' :
+                                    'bg-red-500'
+                                  }`}
+                                  style={{ width: `${pillar.score}%` }}
+                                />
+                              </div>
+                              <p className="text-[10px] text-gray-500 mt-1 line-clamp-2" title={pillar.note}>
+                                {pillar.note}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* Profile Details */}
+                        <div className="text-xs text-gray-500 flex items-center gap-3">
+                          <span>{singleProfileResult.profile.experienceCount} experiences</span>
+                          <span>•</span>
+                          <span>{singleProfileResult.profile.skillCount} skills</span>
+                          {singleProfileResult.score.aiPowered && (
+                            <>
+                              <span>•</span>
+                              <span className="text-purple-600 flex items-center gap-1">
+                                <Sparkles className="h-3 w-3" />
+                                AI Scored
+                              </span>
+                            </>
+                          )}
+                        </div>
+
+                        {/* Clear Button */}
+                        <button
+                          onClick={() => {
+                            setSingleProfileResult(null);
+                            setManualProfileUrl('');
+                          }}
+                          className="text-xs text-gray-500 hover:text-gray-700"
+                        >
+                          Clear result
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div>
@@ -6374,7 +7635,7 @@ export default function SourcingPage() {
                 {expressModeResults.sent > 0 ? (
                   <div className="bg-green-50 rounded-lg p-4 text-center">
                     <div className="text-3xl font-bold text-green-700">{expressModeResults.sent}</div>
-                    <div className="text-sm text-green-600">Connection Requests Sent</div>
+                    <div className="text-sm text-green-600">Auto-Sent (Score ≥80)</div>
                   </div>
                 ) : (
                   <div className="bg-green-50 rounded-lg p-4 text-center">
@@ -6383,6 +7644,16 @@ export default function SourcingPage() {
                   </div>
                 )}
               </div>
+
+              {/* Approval Queue Info */}
+              {expressModeResults.approvalQueue > 0 && (
+                <div className="mb-4 p-3 bg-amber-50 rounded-lg border border-amber-200">
+                  <p className="text-sm text-amber-800 flex items-center gap-2">
+                    <ClipboardList className="h-4 w-4" />
+                    {expressModeResults.approvalQueue} candidate{expressModeResults.approvalQueue > 1 ? 's' : ''} with score 50-79 added to approval queue for your review.
+                  </p>
+                </div>
+              )}
 
               {/* Failed Sends Warning */}
               {expressModeResults.failed > 0 && (
@@ -6423,7 +7694,7 @@ export default function SourcingPage() {
                 <div className="mb-6 p-4 bg-amber-50 rounded-lg">
                   <p className="text-sm text-amber-800">
                     <AlertCircle className="h-4 w-4 inline mr-2" />
-                    No candidates scored 60+ to auto-queue. Review the results below and manually select candidates if needed.
+                    No candidates scored 50+ to auto-queue. Review the results below and manually select candidates if needed.
                   </p>
                 </div>
               )}

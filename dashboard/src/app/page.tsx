@@ -61,6 +61,7 @@ interface QueueItem {
     jobTitle: string;
     skills: string[];
   };
+  source?: 'linkedin' | 'github';
 }
 
 interface Activity {

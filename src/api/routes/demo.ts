@@ -1179,7 +1179,7 @@ router.post('/ai/score-candidates', async (req, res) => {
  * seniority understanding, exclusions, and boolean queries.
  */
 router.post('/ai/generate-search-strategy', async (req, res) => {
-  const { title, description, skills, location, companyContext, intakeNotes, isFullyRemote } = req.body;
+  const { title, description, skills, location, companyContext, intakeNotes, isFullyRemote, searchContext } = req.body;
 
   if (!title) {
     return res.status(400).json({ error: 'title is required' });
@@ -1219,6 +1219,7 @@ router.post('/ai/generate-search-strategy', async (req, res) => {
         companyContext,
         intakeNotes, // Notes from HM that take precedence over JD
         isFullyRemote,
+        searchContext, // Strategic context for intelligent query expansion (industry, comp, culture)
       });
 
       // Extract skill taxonomy for coherent scoring
@@ -1582,6 +1583,8 @@ router.post('/ai/sourcing-score', async (req, res) => {
         technical: role.technical as { mustHave?: string[]; niceToHave?: string[]; architecture?: string[]; scale?: string; tools?: string[]; domain?: string } | undefined,
         intakeNotes, // Notes from HM that take precedence over JD
         isFullyRemote,
+        // Search context for intelligent filtering decisions (company type, compensation, culture fit)
+        searchContext: role.searchContext as string | undefined,
       });
 
       // Clean up temporary API key
@@ -1629,6 +1632,8 @@ router.post('/ai/sourcing-score', async (req, res) => {
     industry: role.industry,
     teamSize: role.teamSize,
     technical: role.technical as { mustHave?: string[]; niceToHave?: string[]; architecture?: string[]; scale?: string; tools?: string[]; domain?: string } | undefined,
+    // Search context for intelligent filtering (fallback mode)
+    searchContext: role.searchContext as string | undefined,
   });
 
   return res.json({
