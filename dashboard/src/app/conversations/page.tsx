@@ -262,15 +262,15 @@ function ConversationsPageContent() {
             unreadCount: number;
             messages: Array<{ id: string; role: string; content: string; timestamp: string }>;
           }) => {
-            // Sort messages chronologically (oldest first for display)
+            // Sort messages newest first (descending)
             const sortedMessages = [...conv.messages].sort((a, b) => {
               const dateA = new Date(a.timestamp).getTime() || 0;
               const dateB = new Date(b.timestamp).getTime() || 0;
-              return dateA - dateB;
+              return dateB - dateA;
             });
 
             // Get the most recent message to determine lastMessageBy
-            const mostRecentMsg = sortedMessages[sortedMessages.length - 1];
+            const mostRecentMsg = sortedMessages[0];
 
             return {
               ...conv,

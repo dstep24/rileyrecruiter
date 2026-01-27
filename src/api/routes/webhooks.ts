@@ -700,11 +700,11 @@ router.post('/linkedin/chat/:chatId/messages', async (req: Request, res: Respons
 
     const { items: messages } = await client.getChatMessages(chatId, limit);
 
-    // Sort chronologically (oldest first for display)
+    // Sort newest first (descending)
     const sorted = [...messages].sort((a, b) => {
       const dateA = new Date(a.created_at || 0).getTime();
       const dateB = new Date(b.created_at || 0).getTime();
-      return dateA - dateB;
+      return dateB - dateA;
     });
 
     return res.json({

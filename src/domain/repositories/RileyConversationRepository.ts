@@ -361,7 +361,7 @@ export class RileyConversationRepository {
       where: Object.keys(where).length > 0 ? where : undefined,
       include: {
         messages: {
-          orderBy: { createdAt: 'asc' },
+          orderBy: { createdAt: 'desc' },
         },
       },
       orderBy: { lastMessageAt: 'desc' },
