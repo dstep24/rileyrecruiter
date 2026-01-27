@@ -700,15 +700,28 @@ router.post('/linkedin/chat/:chatId/messages', async (req: Request, res: Respons
 
     const { items: messages } = await client.getChatMessages(chatId, limit);
 
+    // Sort chronologically (oldest first for display)
+    const sorted = [...messages].sort((a, b) => {
+      const dateA = new Date(a.created_at || 0).getTime();
+      const dateB = new Date(b.created_at || 0).getTime();
+      return dateA - dateB;
+    });
+
     return res.json({
       success: true,
-      messages: messages.map((msg) => ({
-        id: msg.id,
-        role: msg.sender_id === unipileConfig.accountId ? 'riley' : 'candidate',
-        content: msg.text,
-        timestamp: msg.created_at,
-        senderId: msg.sender_id,
-      })),
+      messages: sorted.map((msg) => {
+        // Unipile uses is_sender: 1 when the authenticated account sent the message
+        const msgAny = msg as Record<string, unknown>;
+        const isFromRiley = msgAny.is_sender === 1;
+
+        return {
+          id: msg.id,
+          role: isFromRiley ? 'riley' : 'candidate',
+          content: msg.text || '',
+          timestamp: msg.created_at,
+          senderId: msg.sender_id,
+        };
+      }),
     });
   } catch (error) {
     console.error('[Webhook] Error fetching chat messages:', error);

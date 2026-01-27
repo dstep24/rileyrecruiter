@@ -101,6 +101,7 @@ function ConversationsPageContent() {
   const [assessmentTemplates, setAssessmentTemplates] = useState<{ id: string; name: string }[]>([]);
   const [selectedAssessment, setSelectedAssessment] = useState<unknown>(null);
   const [loadingAssessment, setLoadingAssessment] = useState(false);
+  const [isLoadingMessages, setIsLoadingMessages] = useState(false);
 
   // Load Unipile config from localStorage
   useEffect(() => {
@@ -119,11 +120,75 @@ function ConversationsPageContent() {
     if (targetChatId && conversations.length > 0 && !selectedConversation) {
       const target = conversations.find((c) => c.chatId === targetChatId);
       if (target) {
-        setSelectedConversation(target);
+        selectConversation(target);
         console.log('[Conversations] Auto-selected conversation from URL:', targetChatId);
       }
     }
-  }, [targetChatId, conversations, selectedConversation]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [targetChatId, conversations]);
+
+  // Fetch live messages from Unipile for a specific conversation
+  const fetchLiveMessages = useCallback(async (conv: Conversation) => {
+    if (!unipileConfig) {
+      console.log('[Conversations] No Unipile config, using DB messages for:', conv.chatId);
+      return;
+    }
+
+    setIsLoadingMessages(true);
+    try {
+      const res = await fetch(`${API_BASE}/webhooks/linkedin/chat/${conv.chatId}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ unipileConfig, limit: 50 }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.messages?.length > 0) {
+          const liveMessages: ConversationMessage[] = data.messages.map((msg: {
+            id: string;
+            role: string;
+            content: string;
+            timestamp: string;
+          }) => ({
+            id: msg.id,
+            role: msg.role as 'riley' | 'candidate' | 'teleoperator',
+            content: msg.content,
+            timestamp: msg.timestamp,
+          }));
+
+          // Update the selected conversation with live messages
+          const updated = {
+            ...conv,
+            messages: liveMessages,
+            lastMessageBy: liveMessages[liveMessages.length - 1]?.role === 'candidate' ? 'candidate' as const : 'riley' as const,
+          };
+          setSelectedConversation(updated);
+
+          // Also update in the conversations list so sidebar reflects latest state
+          setConversations(prev => prev.map(c =>
+            c.chatId === conv.chatId
+              ? { ...c, messages: liveMessages, lastMessageBy: updated.lastMessageBy }
+              : c
+          ));
+
+          console.log('[Conversations] Loaded', liveMessages.length, 'live messages from Unipile for:', conv.chatId);
+          return;
+        }
+      }
+      console.log('[Conversations] Could not fetch live messages, using DB data for:', conv.chatId);
+    } catch (err) {
+      console.log('[Conversations] Error fetching live messages, using DB data:', err);
+    } finally {
+      setIsLoadingMessages(false);
+    }
+  }, [unipileConfig]);
+
+  // Select a conversation and fetch live messages
+  const selectConversation = useCallback((conv: Conversation) => {
+    setSelectedConversation(conv);
+    fetchLiveMessages(conv);
+  }, [fetchLiveMessages]);
 
   // Fetch conversations and pending messages
   const fetchData = useCallback(async () => {
@@ -384,7 +449,10 @@ function ConversationsPageContent() {
 
       if (response.ok) {
         setReplyText('');
-        // Refresh data
+        // Refresh live messages for the current conversation
+        if (selectedConversation) {
+          await fetchLiveMessages(selectedConversation);
+        }
         await fetchData();
       } else {
         const error = await response.json();
@@ -618,7 +686,7 @@ function ConversationsPageContent() {
               conversations.map((conv) => (
                 <button
                   key={conv.id}
-                  onClick={() => setSelectedConversation(conv)}
+                  onClick={() => selectConversation(conv)}
                   className={`w-full p-4 text-left hover:bg-gray-50 transition-colors ${
                     selectedConversation?.id === conv.id ? 'bg-blue-50' : ''
                   }`}
@@ -752,6 +820,12 @@ function ConversationsPageContent() {
 
               {/* Messages */}
               <div className="flex-1 p-4 overflow-y-auto space-y-4 bg-gray-50">
+                {isLoadingMessages && (
+                  <div className="flex items-center justify-center py-4">
+                    <Loader2 className="w-5 h-5 animate-spin text-blue-500 mr-2" />
+                    <span className="text-sm text-gray-500">Loading messages from LinkedIn...</span>
+                  </div>
+                )}
                 {selectedConversation.messages.map((msg) => (
                   <div
                     key={msg.id}
@@ -875,7 +949,7 @@ function ConversationsPageContent() {
                         // Find or create conversation and open it
                         const conv = conversations.find((c) => c.chatId === msg.chatId);
                         if (conv) {
-                          setSelectedConversation(conv);
+                          selectConversation(conv);
                         }
                       }}
                       className="px-3 py-1.5 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 transition-colors"
