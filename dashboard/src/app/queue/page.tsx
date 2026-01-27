@@ -77,6 +77,8 @@ interface QueuedCandidate {
   trackerId?: string;
   acceptedAt?: string;
   pitchSentAt?: string;
+  // Riley conversation chatId for deep-linking to Conversations page
+  chatId?: string;
   // Source tracking (linkedin or github)
   source?: 'linkedin' | 'github';
 }
@@ -276,6 +278,7 @@ function QueuePageContent() {
                 trackerId,
                 acceptedAt: backendStatus.acceptedAt || item.acceptedAt,
                 pitchSentAt: backendStatus.pitchSentAt || item.pitchSentAt,
+                chatId: backendStatus.chatId || item.chatId,
               };
             }
 
@@ -510,6 +513,7 @@ function QueuePageContent() {
               trackerId,
               acceptedAt: backendStatus.acceptedAt || item.acceptedAt,
               pitchSentAt: backendStatus.pitchSentAt || item.pitchSentAt,
+              chatId: backendStatus.chatId || item.chatId,
             };
           }
 
@@ -2623,10 +2627,10 @@ Best regards`;
                   Replied
                 </span>
                 <a
-                  href="/conversations"
+                  href={item.chatId ? `/conversations?chatId=${item.chatId}` : '/conversations'}
                   className="px-3 py-1 text-xs bg-cyan-100 text-cyan-700 rounded-lg hover:bg-cyan-200"
                 >
-                  View Conversation
+                  View Conversation &rarr;
                 </a>
               </div>
             ))}

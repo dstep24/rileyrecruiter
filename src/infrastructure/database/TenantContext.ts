@@ -88,6 +88,20 @@ export class TenantContextError extends Error {
  * Usage:
  * const prisma = new PrismaClient().$extends(tenantExtension);
  */
+// Models that do NOT have a tenantId column and should be excluded
+// from automatic tenant filtering/injection
+const MODELS_WITHOUT_TENANT_ID = new Set([
+  'Tenant',
+  'Message',
+  'Assessment',
+  'Interaction',
+  'RileyConversation',
+  'RileyMessage',
+  'PreScreeningQuestion',
+  'PreScreeningResponse',
+  'PreScreeningAnswer',
+]);
+
 export const createTenantExtension = () => ({
   name: 'tenant-extension',
   query: {
@@ -98,8 +112,8 @@ export const createTenantExtension = () => ({
         args: Record<string, unknown>;
         query: (args: Record<string, unknown>) => Promise<unknown>;
       }) {
-        // Skip tenant filtering for Tenant model itself
-        if (model === 'Tenant') {
+        // Skip tenant filtering for models without tenantId column
+        if (MODELS_WITHOUT_TENANT_ID.has(model)) {
           return query(args);
         }
 

@@ -413,12 +413,13 @@ router.post('/status-by-providers', async (req: Request, res: Response) => {
 
     const trackers = await outreachTrackerRepo.findByProviderIds(providerIds);
 
-    // Return a map of providerId -> status info
+    // Return a map of providerId -> status info (includes chatId for deep-linking)
     const statusMap: Record<string, {
       trackerId: string;
       status: string;
       acceptedAt: string | null;
       pitchSentAt: string | null;
+      chatId: string | null;
     }> = {};
 
     for (const tracker of trackers) {
@@ -427,6 +428,7 @@ router.post('/status-by-providers', async (req: Request, res: Response) => {
         status: tracker.status,
         acceptedAt: tracker.acceptedAt?.toISOString() || null,
         pitchSentAt: tracker.pitchSentAt?.toISOString() || null,
+        chatId: tracker.rileyConversation?.chatId || null,
       };
     }
 

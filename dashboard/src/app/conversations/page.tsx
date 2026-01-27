@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 import {
   MessageSquare,
   User,
@@ -74,7 +75,9 @@ interface UnipileConfig {
 // COMPONENT
 // =============================================================================
 
-export default function ConversationsPage() {
+function ConversationsPageContent() {
+  const searchParams = useSearchParams();
+  const targetChatId = searchParams.get('chatId');
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [pendingMessages, setPendingMessages] = useState<PendingMessage[]>([]);
   const [selectedConversation, setSelectedConversation] = useState<Conversation | null>(null);
@@ -110,6 +113,17 @@ export default function ConversationsPage() {
       }
     }
   }, []);
+
+  // Auto-select conversation from URL query param (deep-link from Queue page)
+  useEffect(() => {
+    if (targetChatId && conversations.length > 0 && !selectedConversation) {
+      const target = conversations.find((c) => c.chatId === targetChatId);
+      if (target) {
+        setSelectedConversation(target);
+        console.log('[Conversations] Auto-selected conversation from URL:', targetChatId);
+      }
+    }
+  }, [targetChatId, conversations, selectedConversation]);
 
   // Fetch conversations and pending messages
   const fetchData = useCallback(async () => {
@@ -638,7 +652,14 @@ export default function ConversationsPage() {
                     <ChevronRight className="w-4 h-4 text-gray-400 mt-1" />
                   </div>
                   <div className="flex items-center justify-between mt-2">
-                    {getStatusBadge(conv.status)}
+                    <div className="flex items-center gap-1.5">
+                      {getStatusBadge(conv.status)}
+                      {conv.lastMessageBy === 'candidate' && conv.status === 'active' && (
+                        <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-yellow-100 text-yellow-800">
+                          New Reply
+                        </span>
+                      )}
+                    </div>
                     <span className="text-xs text-gray-500">
                       {formatTime(conv.lastMessageAt)}
                     </span>
@@ -968,5 +989,18 @@ export default function ConversationsPage() {
         </div>
       )}
     </div>
+  );
+}
+
+// Wrap with Suspense for Next.js App Router useSearchParams() requirement
+export default function ConversationsPage() {
+  return (
+    <Suspense fallback={
+      <div className="flex items-center justify-center h-full">
+        <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
+      </div>
+    }>
+      <ConversationsPageContent />
+    </Suspense>
   );
 }

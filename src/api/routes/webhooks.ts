@@ -337,6 +337,32 @@ async function handleIncomingMessage(
   }
 
   // =========================================================================
+  // STEP 2.5: Update OutreachTracker to REPLIED + send notification (first reply)
+  // =========================================================================
+  try {
+    const tracker = await outreachTrackerRepo.findByConversationChatId(event.chatId);
+
+    if (tracker && tracker.status === 'PITCH_SENT') {
+      // First candidate response — mark the tracker as REPLIED
+      await outreachTrackerRepo.markReplied(tracker.id);
+      console.log('[Webhook] OutreachTracker marked as REPLIED:', tracker.id);
+
+      // Send notification to recruiter
+      const notificationService = getNotificationService();
+      await notificationService.notifyCandidateReplied({
+        conversationId: tracker.rileyConversationId || '',
+        candidateName: tracker.candidateName || event.senderName || undefined,
+        jobTitle: tracker.jobTitle || undefined,
+        tenantId: tracker.tenantId,
+      });
+      console.log('[Webhook] CANDIDATE_REPLIED notification sent for:', tracker.candidateName);
+    }
+  } catch (trackerError) {
+    // Non-blocking: don't fail the auto-response flow if tracker update fails
+    console.error('[Webhook] Failed to update OutreachTracker or send notification:', trackerError);
+  }
+
+  // =========================================================================
   // STEP 3: Check for escalation triggers
   // =========================================================================
   const escalationCheck = rileyAutoResponder.checkForEscalation(event.messageText || '');

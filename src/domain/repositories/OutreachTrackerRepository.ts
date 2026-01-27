@@ -126,19 +126,25 @@ export class OutreachTrackerRepository {
   /**
    * Find trackers by multiple provider IDs (for batch status sync)
    * Returns the most recent tracker for each provider ID
+   * Includes rileyConversation.chatId for deep-linking to conversations
    */
-  async findByProviderIds(providerIds: string[]): Promise<OutreachTracker[]> {
+  async findByProviderIds(providerIds: string[]): Promise<(OutreachTracker & { rileyConversation?: { chatId: string } | null })[]> {
     // Get all trackers for these provider IDs
     const trackers = await prisma.outreachTracker.findMany({
       where: {
         candidateProviderId: { in: providerIds },
+      },
+      include: {
+        rileyConversation: {
+          select: { chatId: true },
+        },
       },
       orderBy: { sentAt: 'desc' },
     });
 
     // Return only the most recent tracker per provider ID
     const seenProviders = new Set<string>();
-    const result: OutreachTracker[] = [];
+    const result: typeof trackers = [];
 
     for (const tracker of trackers) {
       if (!seenProviders.has(tracker.candidateProviderId)) {
@@ -148,6 +154,26 @@ export class OutreachTrackerRepository {
     }
 
     return result;
+  }
+
+  /**
+   * Find outreach tracker by Riley conversation chatId.
+   * Used when a webhook message arrives to link back to the tracker.
+   * Join path: chatId → RileyConversation → OutreachTracker.rileyConversationId
+   */
+  async findByConversationChatId(chatId: string): Promise<OutreachTracker | null> {
+    // Find the RileyConversation by chatId first
+    const conversation = await prisma.rileyConversation.findUnique({
+      where: { chatId },
+      select: { id: true },
+    });
+
+    if (!conversation) return null;
+
+    // Then find the OutreachTracker linked to this conversation
+    return prisma.outreachTracker.findFirst({
+      where: { rileyConversationId: conversation.id },
+    });
   }
 
   /**
